@@ -49,7 +49,7 @@ async function main() {
     return codex.result;
   }
   if (!model.startsWith('anthropic/')) throw new Error('CODEX_CLAUDE_MODEL must name an anthropic/ model.');
-  const stateDir = join(process.env.XDG_STATE_HOME || join(homedir(), '.local/state'), 'pi-codex-bridge');
+  const stateDir = join(process.env.XDG_STATE_HOME || join(homedir(), '.local/state'), 'codex-claude-bridge');
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const keyFile = join(stateDir, 'reasoning.key');
   if (!existsSync(keyFile)) {

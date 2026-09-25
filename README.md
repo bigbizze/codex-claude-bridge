@@ -1,4 +1,4 @@
-# Codex with Claude through Pi
+# Codex Claude Bridge
 
 Run Codex with an Anthropic model authenticated through Pi. This is an
 independent integration, not an official OpenAI or Anthropic product.
@@ -16,7 +16,13 @@ Install those CLI versions if they are not already available:
 npm install -g @openai/codex@0.156.1 @earendil-works/pi-coding-agent@0.87.1
 ```
 
-Clone this repository or extract its source archive, then enter its directory.
+Clone this repository and enter its directory:
+
+```bash
+git clone https://github.com/bigbizze/codex-claude-bridge.git
+cd codex-claude-bridge
+```
+
 This project has no npm dependencies, so it does not need `npm install`.
 Start `pi` and run `/login anthropic` to configure authentication, then exit Pi.
 Credentials stay in Pi's auth store; do not copy them into this checkout.
@@ -33,7 +39,7 @@ To use `codex-claude` from any directory, add an alias to `~/.bashrc` with the
 absolute path to your checkout. Replace the example path below:
 
 ```bash
-alias codex-claude='node "/absolute/path/to/pi-codex-bridge/launch.mjs"'
+alias codex-claude='node "/absolute/path/to/codex-claude-bridge/launch.mjs"'
 ```
 
 Open a new Bash shell or run `source ~/.bashrc` to load the alias. Moving the
@@ -60,7 +66,7 @@ Pi owns subscription authentication and token refresh. The bridge uses `ctx.mode
 
 The launcher generates a Codex model catalog using Pi's model names, input modalities, reasoning support, and context limits. This avoids the model metadata fallback warning. `codex-instructions.md` preserves Codex's generic coding instructions, copied from OpenAI Codex tag `rust-v0.156.1`, `codex-rs/models-manager/prompt.md`. Its obsolete shell-based apply_patch example was replaced with the custom tool input format. See `LICENSE.codex` for the source license.
 
-Thinking blocks and provider signatures are encrypted into Responses reasoning items so tool loops can continue after a restart. The encryption key is stored at `${XDG_STATE_HOME:-~/.local/state}/pi-codex-bridge/reasoning.key` with mode 0600. Keep this key if you need to resume bridge sessions. Pi OAuth credentials remain in Pi's own auth store.
+Thinking blocks and provider signatures are encrypted into Responses reasoning items so tool loops can continue after a restart. The encryption key is stored at `${XDG_STATE_HOME:-~/.local/state}/codex-claude-bridge/reasoning.key` with mode 0600. Keep this key if you need to resume bridge sessions. Pi OAuth credentials remain in Pi's own auth store.
 
 ## Supported and unsupported operations
 

@@ -164,7 +164,7 @@ export function createBridge({ registry, token, codec, requestTimeoutMs = 600000
     if (auth.length !== expected.length || !timingSafeEqual(auth, expected)) return json(res, 401, { error: { message: 'Bridge authentication required.' } });
     const path = new URL(req.url, 'http://localhost').pathname;
     const models = () => registry.getAvailable().filter(model => model.provider === 'anthropic');
-    if (req.method === 'GET' && path === '/health') return json(res, 200, { service: 'pi-codex-bridge', version: 2 });
+    if (req.method === 'GET' && path === '/health') return json(res, 200, { service: 'codex-claude-bridge', version: 2 });
     if (req.method === 'GET' && path === '/v1/models') return json(res, 200, catalog(models()));
     if (req.method !== 'POST' || path !== '/v1/responses') return json(res, 404, { error: { message: 'Unsupported endpoint.' } });
     const controller = new AbortController();

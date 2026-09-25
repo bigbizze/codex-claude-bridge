@@ -1,5 +1,5 @@
 {
-  "name": "pi-codex-bridge",
+  "name": "codex-claude-bridge",
   "description": "Run Codex with Claude through an authenticated local Pi Responses bridge",
   "license": "MIT AND Apache-2.0",
   "private": true,
