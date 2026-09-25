@@ -1,0 +1,13 @@
+{
+  "name": "pi-codex-bridge",
+  "description": "Run Codex with Claude through an authenticated local Pi Responses bridge",
+  "license": "MIT AND Apache-2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node launch.mjs",
+    "check": "node launch.mjs --check",
+    "test": "node --test bridge.test.mjs"
+  },
+  "engines": { "node": ">=22" }
+}

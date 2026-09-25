@@ -1,0 +1,13 @@
+The following attribution applies to codex-instructions.md:
+
+OpenAI Codex
+Copyright 2025 OpenAI
+
+Source: https://github.com/openai/codex/blob/rust-v0.156.1/codex-rs/models-manager/prompt.md
+Upstream notice: https://github.com/openai/codex/blob/rust-v0.156.1/NOTICE
+License: Apache-2.0; see LICENSE.codex.
+
+Modified for this bridge: the shell-based apply_patch example was replaced
+with the custom tool input format.
+
+The remaining bridge code is licensed under MIT; see LICENSE.
