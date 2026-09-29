@@ -37,7 +37,9 @@ export function catalog(models) {
     slug: `${model.provider}/${model.id}`, display_name: model.name || model.id,
     description: 'Claude through the local Pi bridge',
     default_reasoning_level: model.reasoning ? 'medium' : null,
-    supported_reasoning_levels: model.reasoning ? ['low', 'medium', 'high'].filter(level => model.thinkingLevelMap?.[level] !== null).map(effort => ({ effort, description: `${effort} reasoning effort` })) : [],
+    supported_reasoning_levels: model.reasoning ? ['low', 'medium', 'high', 'xhigh', 'max'].filter(level =>
+      ['xhigh', 'max'].includes(level) ? model.thinkingLevelMap?.[level] === level : model.thinkingLevelMap?.[level] !== null
+    ).map(effort => ({ effort, description: `${effort} reasoning effort` })) : [],
     shell_type: 'unified_exec', visibility: 'list', supported_in_api: true, priority,
     availability_nux: null, upgrade: null, model_messages: { instructions_template: instructions },
     include_apps_usage_instructions: false,

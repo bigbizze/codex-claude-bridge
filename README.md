@@ -53,10 +53,16 @@ configured Anthropic account.
 codex-claude
 codex-claude exec 'Explain this project'
 codex-claude -c model_reasoning_effort='"high"'
+codex-claude -c model_reasoning_effort='"xhigh"'
+codex-claude -c model_reasoning_effort='"max"'
 codex-claude --check
 ```
 
 `--check` starts the bridge and asks Codex to parse the model catalog. It makes no model inference request. `CODEX_CLAUDE_MODEL` selects another authenticated `anthropic/` model. Normal Codex sandbox and approval settings still apply.
+
+The effort picker includes extra high (`xhigh`) and `max` when Pi's model metadata
+maps those values to native provider levels. Claude Opus 5.5 supports both.
+Medium remains the default. Restart the bridge to load an updated picker.
 
 ## Runtime
 
@@ -77,6 +83,19 @@ Unsupported requests fail explicitly: provider-hosted tools, remote image URLs, 
 The request limit is 16 MiB and the model request timeout is 10 minutes. Network errors and interrupted/incomplete responses remain errors. A simple successful prompt does not establish compatibility with every Codex feature.
 
 ## Updates and troubleshooting
+
+To update the bridge, exit any running bridge sessions and run these commands
+from your repository checkout:
+
+```bash
+git pull --ff-only
+node --test bridge.test.mjs
+node launch.mjs --check
+```
+
+Restart `codex-claude` after the update. Your existing alias still works.
+This updates only the bridge, not Codex or Pi. If Git reports local changes or
+divergent history, resolve those before retrying; do not discard your changes.
 
 Validated with Codex 0.156.1, Pi 0.87.1, and Node 24.21.0. The earlier Codex 0.156.0 to 0.156.1 upgrade did not break model calls.
 

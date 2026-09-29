@@ -27,6 +27,25 @@ test('catalog uses Pi limits, supported inputs and valid coding instructions', (
   assert.ok(!entry.model_messages.instructions_template.includes('"command":["apply_patch"'));
 });
 
+test('catalog exposes extended efforts only when Pi maps them to native levels', () => {
+  const levels = overrides => catalog([{ ...model, ...overrides }]).models[0].supported_reasoning_levels.map(item => item.effort);
+  assert.deepEqual(levels({}), ['low', 'medium', 'high']);
+  assert.deepEqual(levels({ thinkingLevelMap: { xhigh: 'xhigh', max: 'max' } }), ['low', 'medium', 'high', 'xhigh', 'max']);
+  assert.deepEqual(levels({ thinkingLevelMap: { xhigh: null, max: 'max' } }), ['low', 'medium', 'high', 'max']);
+  assert.deepEqual(levels({ thinkingLevelMap: { low: null, xhigh: 'high', max: null } }), ['medium', 'high']);
+  assert.deepEqual(levels({ reasoning: false, thinkingLevelMap: { xhigh: 'xhigh', max: 'max' } }), []);
+});
+
+test('extended efforts reach Pi unchanged', async t => {
+  for (const effort of ['xhigh', 'max']) {
+    const { request } = await start(t, async function* (_model, _context, options) {
+      assert.equal(options.reasoning, effort);
+      yield { type: 'done', reason: 'stop', message: assistant([{ type: 'text', text: 'OK' }]) };
+    });
+    assert.equal((await request({ reasoning: { effort } })).status, 200);
+  }
+});
+
 test('preserves namespace calls, parallel calls, custom inputs, developer instructions and images', () => {
   const encrypted = codec.seal({ type: 'thinking', thinking: 'plan', thinkingSignature: 'signed' }, modelId);
   const request = { model: modelId, instructions: 'base', tools: [{ type: 'namespace', name: 'functions', tools: [{ type: 'function', name: 'exec_command', parameters: { type: 'object' } }, { type: 'custom', name: 'apply_patch' }] }], input: [
