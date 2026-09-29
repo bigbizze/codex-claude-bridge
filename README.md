@@ -64,6 +64,70 @@ The effort picker includes extra high (`xhigh`) and `max` when Pi's model metada
 maps those values to native provider levels. Claude Opus 5.5 supports both.
 Medium remains the default. Restart the bridge to load an updated picker.
 
+## Switch providers
+
+Finish the current turn and exit its client, then use its session UUID:
+
+```bash
+codex-claude switch-to-codex <session-id>
+codex-claude switch-to-claude <session-id>
+```
+
+Each command creates a new continuation and opens it in the terminal. It keeps
+the source working directory and does not modify the source session or project
+files. Switch back using the new continuation's ID, not the old source ID, to
+include the intervening work. This is an explicit handoff, not an in-session
+`/model` provider switch.
+
+`switch-to-codex` uses normal Codex configuration for the provider, model, effort,
+authentication, and permissions. It does not start Pi or install the bridge's
+model catalog. `switch-to-claude` uses the bridge defaults: `CODEX_CLAUDE_MODEL`
+if set, otherwise Claude Opus 5.5, with medium effort. The source's model, effort,
+and permission settings are not copied to the destination. Neither command
+accepts model overrides; configure the destination before switching.
+
+The handoff builds a shared history from the saved conversation:
+
+- User messages, assistant answers, and inline images are preserved.
+- Readable reasoning summaries are preserved as historical text. Encrypted
+  reasoning stays in the archive and is not replayed, even when switching back.
+- Tool calls and results become historical text records. They retain the saved
+  arguments and readable results, but are not executable calls in the new thread.
+- Destination instructions are loaded afresh. Source system/developer setup,
+  runtime settings, and opaque provider fields are archived, not imported.
+- Available messages from before compaction and readable compaction summaries
+  are retained. No model-generated summary or automatic truncation is performed.
+
+Each transfer writes a private directory under
+`${XDG_STATE_HOME:-~/.local/state}/codex-claude-bridge/handoffs/` containing
+`source.jsonl` (the original bytes), `state.json` (the shared history), and
+`receipt.json` (source/destination IDs and the source hash). Directories use mode
+0700 and files use 0600. These files contain conversation data, possibly including
+sensitive tool output; protect them like your Codex history. They do not belong
+in this repository. A failed transfer can leave an archive and an incomplete new
+thread; the error identifies them, and that thread is not launched automatically.
+
+Handoffs require Codex App Server's experimental `thread/inject_items` method and
+are validated with Codex 0.159.0. They currently support standalone local JSONL
+histories, including the local paginated format. Forked histories, rollbacks,
+unfinished tool calls/turns, remote histories, audio, file-ID/remote images, and
+unknown item types fail explicitly. Close the source client first: a separate
+App Server cannot reliably detect an idle client that may write again later.
+The command also checks that the source bytes have not changed during transfer.
+
+The archive limit is 128 MiB; projected history is limited to 12 MiB. The target
+model's context limit still applies, and Codex may compact that target session.
+An archive cannot recover history that Codex removed before the handoff. Imported
+records are model-visible context; they may not appear as old turns in the TUI.
+
+Tests for the shared state and failure paths run with `npm test`. To also test
+persistence, resume, and both request directions with the installed Codex and a
+loopback-only mock model endpoint (no account or paid inference):
+
+```bash
+CODEX_HANDOFF_INTEGRATION=1 node --test handoff.integration.test.mjs
+```
+
 ## Runtime
 
 Each launch starts one Pi RPC process with only this project's `extension.ts` enabled. That extension serves the Responses API directly on an OS-assigned loopback port. The Codex process receives a random per-launch bearer token. Ports and services are never shared between launches. The launcher stops its Pi process and removes its temporary catalog when Codex exits.

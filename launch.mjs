@@ -4,6 +4,7 @@ import { mkdirSync, writeFileSync, readFileSync, chmodSync, mkdtempSync, rmSync,
 import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { createHandoff, parseSwitch } from './handoff.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const model = process.env.CODEX_CLAUDE_MODEL || 'anthropic/claude-opus-5-5';
@@ -12,6 +13,7 @@ const children = [];
 let runtimeDir;
 let codex;
 let closing;
+let handoffClient;
 
 function child(command, args, options) {
   const process = spawn(command, args, options);
@@ -29,6 +31,7 @@ function child(command, args, options) {
 async function cleanup() {
   if (closing) return closing;
   closing = (async () => {
+    if (handoffClient) await handoffClient.close();
     for (const entry of [...children].reverse()) {
       if (entry.process.exitCode !== null || entry.process.signalCode !== null) continue;
       entry.process.kill('SIGTERM');
@@ -44,12 +47,26 @@ process.on('SIGTERM', () => { cleanup().then(() => process.exit(143)); });
 process.on('SIGINT', () => { if (!codex) cleanup().then(() => process.exit(130)); });
 
 async function main() {
+  const switching = parseSwitch(userArgs);
+  const stateDir = join(process.env.XDG_STATE_HOME || join(homedir(), '.local/state'), 'codex-claude-bridge');
+  const handoff = async (args, env) => {
+    const result = await createHandoff({ ...switching, stateDir, args, env, onClient: client => { handoffClient = client; } });
+    console.log(`Created ${result.destination} continuation: ${result.destinationId}`);
+    console.log(`Provider: ${result.provider}; model: ${result.model}; effort: ${result.reasoningEffort ?? 'default'}.`);
+    console.log(`Original session preserved. Handoff archive: ${result.archiveDir}`);
+    return ['--no-daemon', '-C', result.cwd, 'resume', result.destinationId];
+  };
+  if (switching?.destination === 'codex') {
+    const resumeArgs = await handoff([], process.env);
+    codex = child('codex', resumeArgs, { stdio: 'inherit' });
+    return codex.result;
+  }
   if (userArgs.length === 1 && ['--version', '-V', '--help', '-h'].includes(userArgs[0])) {
+    if (['--help', '-h'].includes(userArgs[0])) console.log('Bridge commands:\n  codex-claude --check\n  codex-claude switch-to-codex <session-id>\n  codex-claude switch-to-claude <session-id>\nSwitch commands preserve the source and open a new continuation using destination defaults.\n');
     codex = child('codex', userArgs, { stdio: 'inherit' });
     return codex.result;
   }
   if (!model.startsWith('anthropic/')) throw new Error('CODEX_CLAUDE_MODEL must name an anthropic/ model.');
-  const stateDir = join(process.env.XDG_STATE_HOME || join(homedir(), '.local/state'), 'codex-claude-bridge');
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const keyFile = join(stateDir, 'reasoning.key');
   if (!existsSync(keyFile)) {
@@ -110,7 +127,8 @@ async function main() {
     console.log(`Ready: ${model}; medium effort; context ${entry.context_window}; authenticated loopback proxy.`);
     return 0;
   }
-  codex = child('codex', [...config, ...userArgs], { env, stdio: 'inherit' });
+  const clientArgs = switching ? await handoff([...config.slice(0, -2), '-c', `model=${JSON.stringify(model)}`], env) : userArgs;
+  codex = child('codex', [...config, ...clientArgs], { env, stdio: 'inherit' });
   // If Pi fails during the session, terminate the client instead of leaving it retrying a dead port.
   pi.result.then(() => { if (!closing && codex.process.exitCode === null) codex.process.kill('SIGTERM'); });
   return codex.result;
