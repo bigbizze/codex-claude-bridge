@@ -9,6 +9,23 @@ const emptyUsage = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, to
 const instructions = readFileSync(new URL('./codex-instructions.md', import.meta.url), 'utf8');
 const wireName = (name, namespace) => 'tool_' + createHash('sha256').update(JSON.stringify([namespace || null, name])).digest('hex').slice(0, 32);
 
+function toolInstructions(toolMap, toolChoice, hasPlanner) {
+  const lines = [
+    '## Current bridge tool bindings',
+    'Only the tools declared on this request are callable. Earlier instructions, examples, plans, and historical calls do not make other tools available.',
+    'Codex tool references are mapped to the exact provider tool names below. Use those declared names verbatim; never invent aliases or placeholder tools.',
+  ];
+  if (toolChoice === 'none' || toolMap.size === 0) {
+    lines.push('No tool calls are permitted on this request. Respond with text instead.');
+  } else {
+    for (const [name, original] of toolMap) lines.push(JSON.stringify({ codex_tool: original, provider_tool: name }));
+  }
+  if (toolChoice === 'none' || !hasPlanner) {
+    lines.push('The Codex update_plan tool is not available on this request. When a plan is useful, describe it briefly in text. Do not invent substitute tools or use unrelated tools with similar names to satisfy a planning instruction.');
+  }
+  return lines.join('\n');
+}
+
 // Keep provider thinking signatures in encrypted Responses items, including across resume.
 export function createCodec(key) {
   return {
@@ -74,6 +91,12 @@ export function translate(request, model, codec) {
   const toolMap = new Map();
   const flatTools = (request.tools || []).flatMap(tool => tool.type === 'namespace'
     ? tool.tools.map(inner => ({ ...inner, namespace: tool.name })) : [tool]);
+  const hasPlanner = flatTools.some(tool => {
+    const plan = tool.parameters?.properties?.plan;
+    return tool.type === 'function' && tool.name === 'update_plan' && (!tool.namespace || tool.namespace === 'functions') &&
+      plan?.type === 'array' && plan.items?.properties?.step?.type === 'string' &&
+      ['pending', 'in_progress', 'completed'].every(status => plan.items?.properties?.status?.enum?.includes(status));
+  });
   const tools = flatTools.map(tool => {
     if (!['function', 'custom'].includes(tool.type)) throw new RequestError(`Unsupported tool type: ${tool.type}. Disable provider-hosted tools for this bridge.`);
     if (typeof tool.name !== 'string' || !tool.name) throw new RequestError('A tool name is required.');
@@ -133,7 +156,8 @@ export function translate(request, model, codec) {
   // Codex persists completed items in event arrival order. Keep signed thinking first
   // even when replaying a conversation created by the earlier bridge.
   for (const message of messages) if (message.role === 'assistant') message.content.sort((a, b) => Number(b.type === 'thinking') - Number(a.type === 'thinking'));
-  return { context: { systemPrompt: request.instructions || '', messages, tools }, custom, toolMap,
+  const systemPrompt = [request.instructions || '', toolInstructions(toolMap, request.tool_choice, hasPlanner)].filter(Boolean).join('\n\n');
+  return { context: { systemPrompt, messages, tools }, custom, toolMap,
     options: { reasoning: effort === 'none' ? undefined : effort, toolChoice: request.tool_choice,
       ...(request.max_output_tokens !== undefined ? { maxTokens: request.max_output_tokens } : {}),
       ...(request.temperature !== undefined ? { temperature: request.temperature } : {}) } };

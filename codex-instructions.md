@@ -51,7 +51,7 @@ Before making tool calls, send a brief preamble to the user explaining what you�
 
 ## Planning
 
-You have access to an `update_plan` tool which tracks steps and progress and renders them to the user. Using the tool helps demonstrate that you've understood the task and convey how you're approaching it. Plans can help to make complex, ambiguous, or multi-phase work clearer and more collaborative for the user. A good plan should break the task into meaningful, logically ordered steps that are easy to verify as you go.
+When `update_plan` is included in the current tool definitions, use it to track steps and progress and render them to the user. If it is not available, describe a short plan in text when useful; do not invent a tool or placeholder. Plans can help to make complex, ambiguous, or multi-phase work clearer and more collaborative for the user. A good plan should break the task into meaningful, logically ordered steps that are easy to verify as you go.
 
 Note that plans are not for padding out simple work with filler steps or stating the obvious. The content of your plan should not involve doing anything that you aren't capable of doing (i.e. don't try to test things that you can't test). Do not use plans for simple or single-step queries that you can just do or answer immediately.
 
@@ -266,7 +266,7 @@ When using the shell, you must adhere to the following guidelines:
 
 ## `update_plan`
 
-A tool named `update_plan` is available to you. You can use it to keep an up‑to‑date, step‑by‑step plan for the task.
+Use these instructions only when `update_plan` is included in the current tool definitions. Otherwise, keep any useful plan in text and do not call an undeclared tool.
 
 To create a new plan, call `update_plan` with a short list of 1‑sentence steps (no more than 5-7 words each) with a `status` for each step (`pending`, `in_progress`, or `completed`).
 
