@@ -8,6 +8,7 @@ Upstream notice: https://github.com/openai/codex/blob/rust-v0.156.1/NOTICE
 License: Apache-2.0; see LICENSE.codex.
 
 Modified for this bridge: the shell-based apply_patch example was replaced
-with the custom tool input format.
+with the custom tool input format. Planning instructions were made conditional
+on the update_plan tool being declared in the current request.
 
 The remaining bridge code is licensed under MIT; see LICENSE.

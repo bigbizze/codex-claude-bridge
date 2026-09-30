@@ -57,7 +57,7 @@ test('preserves namespace calls, parallel calls, custom inputs, developer instru
     { type: 'custom_tool_call_output', call_id: 'call_2', output: 'done' },
   ] };
   const result = translate(request, model, codec);
-  assert.equal(result.context.systemPrompt, 'base');
+  assert.ok(result.context.systemPrompt.startsWith('base\n\n'));
   assert.equal(result.context.messages[0].role, 'system');
   assert.equal(result.context.messages[1].content[0].type, 'image');
   assert.equal(result.context.messages[2].content.length, 3);
@@ -65,6 +65,53 @@ test('preserves namespace calls, parallel calls, custom inputs, developer instru
   assert.equal(result.context.messages[2].content[2].arguments.input, '*** Begin Patch\n*** End Patch');
   assert.equal(result.context.messages[3].toolName, result.context.tools[0].name);
   assert.deepEqual(result.toolMap.get(result.context.tools[0].name), { name: 'exec_command', namespace: 'functions' });
+});
+
+test('current tool bindings explain hashed names and override stale planning instructions', () => {
+  const result = translate({ instructions: 'You have access to update_plan.', input: 'Continue', tools: [
+    { type: 'namespace', name: 'functions', tools: [{ type: 'function', name: 'exec_command' }, { type: 'custom', name: 'apply_patch' }] },
+    { type: 'namespace', name: 'other', tools: [{ type: 'function', name: 'exec_command' }] },
+  ] }, model, codec);
+  const prompt = result.context.systemPrompt;
+  assert.match(prompt, /update_plan tool is not available/);
+  assert.match(prompt, /never invent aliases or placeholder tools/);
+  for (const [name, original] of result.toolMap) assert.ok(prompt.includes(JSON.stringify({ codex_tool: original, provider_tool: name })));
+  assert.equal(new Set(result.context.tools.map(tool => tool.name)).size, 3);
+  const replay = translate({ tools: [{ type: 'function', name: 'exec_command' }], input: [
+    { type: 'function_call', name: 'exec_command', call_id: 'old', arguments: '{}' },
+    { type: 'function_call_output', call_id: 'old', output: 'done' },
+  ] }, model, codec);
+  assert.equal(replay.context.messages[0].content[0].name, replay.context.tools[0].name);
+});
+
+test('available plan tools are mapped normally and disabled requests forbid calls', () => {
+  const tools = [{ type: 'function', name: 'update_plan', parameters: { type: 'object', properties: { plan: { type: 'array', items: { type: 'object', properties: { step: { type: 'string' }, status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] } } } } } } }];
+  const available = translate({ input: 'Plan', tools }, model, codec);
+  assert.doesNotMatch(available.context.systemPrompt, /update_plan tool is not available/);
+  assert.ok(available.context.systemPrompt.includes(available.context.tools[0].name));
+  const namespaced = translate({ input: 'Plan', tools: [{ type: 'namespace', name: 'functions', tools }] }, model, codec);
+  assert.doesNotMatch(namespaced.context.systemPrompt, /update_plan tool is not available/);
+  for (const unrelated of [
+    [{ type: 'custom', name: 'update_plan' }],
+    [{ type: 'function', name: 'update_plan' }],
+    [{ type: 'namespace', name: 'billing', tools }],
+  ]) assert.match(translate({ input: 'Plan', tools: unrelated }, model, codec).context.systemPrompt, /update_plan tool is not available/);
+  for (const request of [{ tools: [] }, { tools, tool_choice: 'none' }]) {
+    const result = translate({ input: 'Plan', ...request }, model, codec);
+    assert.match(result.context.systemPrompt, /No tool calls are permitted/);
+    assert.match(result.context.systemPrompt, /update_plan tool is not available/);
+  }
+});
+
+test('undeclared placeholder calls still fail instead of executing a guessed tool', async t => {
+  const { request } = await start(t, async function* () {
+    yield { type: 'done', reason: 'toolUse', message: assistant([{ type: 'toolCall', id: 'bad', name: 'tool_update_plan_placeholder', arguments: {} }]) };
+  });
+  const response = await request({ stream: true, tools: [{ type: 'function', name: 'update_plan' }] });
+  const data = events(await response.text());
+  assert.equal(data.at(-1).type, 'response.failed');
+  assert.match(data.at(-1).response.error.message, /undeclared tool/);
+  assert.ok(!data.some(event => event.type === 'response.output_item.added'));
 });
 
 test('rejects unsupported inputs, broken tool history and altered reasoning', () => {
