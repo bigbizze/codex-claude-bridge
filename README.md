@@ -144,7 +144,11 @@ Supported: text, base64 images, developer instructions, streamed output, namespa
 
 Unsupported requests fail explicitly: provider-hosted tools, remote image URLs, input files, Responses compaction items, background Responses jobs, previous_response_id continuation, and forced tool selection. Codex's native web search is disabled for this provider. Local/MCP tools can still run through Codex. Custom grammar tools are adapted to a JSON string argument; the provider does not enforce the original grammar.
 
-The request limit is 16 MiB and the model request timeout is 10 minutes. Network errors and interrupted/incomplete responses remain errors. A simple successful prompt does not establish compatibility with every Codex feature.
+The request limit is 16 MiB. Model requests time out after 10 minutes without
+provider activity. Each provider event resets this timer; local SSE heartbeats
+do not. An active response can run longer than 10 minutes. Network errors and
+interrupted/incomplete responses remain errors. A simple successful prompt does
+not establish compatibility with every Codex feature.
 
 ## Updates and troubleshooting
 
@@ -158,6 +162,11 @@ node launch.mjs --check
 ```
 
 Restart `codex-claude` after the update. Your existing alias still works.
+The bridge adds a user continuation message when a retry ends with retained
+assistant text. It omits unfinished thinking-only assistant turns from provider
+requests, because Claude rejects those turns. Existing conversation files are
+preserved. Pi can retry failed connection attempts twice before response
+streaming starts. It does not repeat a response after streaming starts.
 This updates only the bridge, not Codex or Pi. If Git reports local changes or
 divergent history, resolve those before retrying; do not discard your changes.
 

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { randomBytes } from 'node:crypto';
+import { Readable, Writable } from 'node:stream';
 import { createBridge, createCodec, catalog, translate } from './bridge.mjs';
 
 const model = { id: 'claude-test', name: 'Test Claude', provider: 'anthropic', api: 'anthropic-messages', reasoning: true, input: ['text', 'image'], contextWindow: 1000000, maxTokens: 64000 };
@@ -18,6 +19,59 @@ async function start(t, streamSimple, timeout) {
   return { url, request };
 }
 function events(text) { return text.split('\n').filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6))); }
+
+// Exercise the HTTP handler without opening a socket; fake time controls the
+// provider inactivity deadline independently of the client heartbeat.
+function inMemoryRequest(t, streamSimple, requestTimeoutMs) {
+  const bridge = createBridge({ registry: { getAvailable: () => [model], streamSimple }, token: 'test-token', codec, requestTimeoutMs });
+  t.after(() => bridge.close());
+  const req = Readable.from([Buffer.from(JSON.stringify({ model: modelId, input: 'Hi', stream: true }))]);
+  Object.assign(req, { headers: { authorization: 'Bearer test-token' }, method: 'POST', url: '/v1/responses' });
+  let output = '';
+  const res = new Writable({ write(chunk, _encoding, done) { output += chunk; done(); } });
+  res.writeHead = () => { res.headersSent = true; };
+  const finished = once(res, 'finish').then(() => events(output));
+  bridge.server.emit('request', req, res);
+  return finished;
+}
+
+test('provider activity extends the timeout beyond the total request duration', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  const finished = inMemoryRequest(t, async function* (_model, _context, { signal }) {
+    const partial = assistant([{ type: 'text', text: '' }]);
+    yield { type: 'text_start', contentIndex: 0, partial };
+    for (let i = 0; i < 3; i++) {
+      await new Promise(resolve => setTimeout(resolve, 60));
+      assert.equal(signal.aborted, false);
+      partial.content[0].text += 'a';
+      yield { type: 'text_delta', contentIndex: 0, delta: 'a', partial };
+    }
+    yield { type: 'done', reason: 'stop', message: partial };
+  }, 100);
+  await new Promise(setImmediate);
+  for (let i = 0; i < 3; i++) {
+    t.mock.timers.tick(60);
+    await new Promise(setImmediate);
+  }
+  const data = await finished;
+  assert.equal(data.at(-1).type, 'response.completed');
+  assert.equal(data.at(-1).response.output[0].content[0].text, 'aaa');
+});
+
+test('client heartbeats do not keep a stalled provider alive', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  const finished = inMemoryRequest(t, async function* (_model, _context, { signal }) {
+    yield { type: 'start', partial: assistant([]) };
+    await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+    yield { type: 'error', error: { errorMessage: 'aborted' } };
+  }, 40000);
+  await new Promise(setImmediate);
+  t.mock.timers.tick(40000);
+  const data = await finished;
+  assert.ok(data.some(event => event.type === 'response.in_progress'));
+  assert.equal(data.at(-1).type, 'response.failed');
+  assert.match(data.at(-1).response.error.message, /Provider idle timeout/);
+});
 
 test('catalog uses Pi limits, supported inputs and valid coding instructions', () => {
   const entry = catalog([model]).models[0];
@@ -121,6 +175,51 @@ test('rejects unsupported inputs, broken tool history and altered reasoning', ()
   const encrypted = codec.seal({ type: 'thinking', thinking: 'secret', thinkingSignature: 'signature' }, modelId);
   assert.equal(codec.open(encrypted).model, modelId);
   assert.throws(() => codec.open(encrypted.slice(0, -5) + 'xxxxx'));
+});
+
+test('retries retained assistant output without requesting Claude prefill', async t => {
+  const thinking = { type: 'thinking', thinking: 'Pending work', thinkingSignature: 'signed' };
+  const reasoning = { type: 'reasoning', encrypted_content: codec.seal(thinking, modelId) };
+  const text = { role: 'assistant', content: [{ type: 'output_text', text: 'I will now write the file.' }] };
+  for (const tail of [[text], [reasoning, text], [reasoning, text, { role: 'developer', content: 'Keep the existing constraints.' }]]) {
+    const input = [{ role: 'user', content: 'Finish the task.' }, ...tail];
+    const original = structuredClone(input);
+    const { request } = await start(t, async function* (_model, context) {
+      assert.equal(context.messages.at(-1).role, 'user');
+      assert.match(context.messages.at(-1).content[0].text, /^Continue from the previous assistant response/);
+      const retained = context.messages.find(message => message.role === 'assistant');
+      if (tail.includes(reasoning)) assert.deepEqual(retained.content[0], thinking);
+      if (tail.includes(text)) assert.ok(retained.content.some(block => block.text === text.content[0].text));
+      yield { type: 'done', reason: 'stop', message: assistant([{ type: 'text', text: 'Done' }]) };
+    });
+    assert.equal((await request({ input })).status, 200);
+    assert.deepEqual(input, original);
+  }
+});
+
+test('omits interrupted thinking-only turns, including old history and whitespace text', () => {
+  const reasoning = { type: 'reasoning', encrypted_content: codec.seal({ type: 'thinking', thinking: 'unfinished', thinkingSignature: 'signed' }, modelId) };
+  const user = { role: 'user', content: 'Finish the task.' };
+  for (const tail of [[reasoning], [reasoning, { role: 'assistant', content: '   ' }], [reasoning, { role: 'developer', content: 'Keep the constraints.' }], [reasoning, user]]) {
+    const input = [user, ...tail];
+    const original = structuredClone(input);
+    const { context } = translate({ input }, model, codec);
+    assert.ok(context.messages.every(message => message.role !== 'assistant'));
+    assert.deepEqual(context.messages[0].content, [{ type: 'text', text: user.content }]);
+    assert.deepEqual(input, original);
+  }
+});
+
+test('normal user and tool-result turns need no synthetic continuation', () => {
+  const call = { type: 'function_call', name: 'exec_command', call_id: 'call_1', arguments: '{}' };
+  for (const input of [
+    [{ role: 'user', content: 'Continue' }],
+    [call],
+    [call, { type: 'function_call_output', call_id: 'call_1', output: 'done' }],
+  ]) {
+    const { context } = translate({ input }, model, codec);
+    assert.equal(context.messages.length, input.length);
+  }
 });
 
 test('authenticates all endpoints and reports malformed input before inference', async t => {

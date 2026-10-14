@@ -156,6 +156,22 @@ export function translate(request, model, codec) {
   // Codex persists completed items in event arrival order. Keep signed thinking first
   // even when replaying a conversation created by the earlier bridge.
   for (const message of messages) if (message.role === 'assistant') message.content.sort((a, b) => Number(b.type === 'thinking') - Number(a.type === 'thinking'));
+  // A failed stream can leave a completed reasoning item without its text or tool
+  // call. Anthropic rejects thinking-only assistant turns even before a user
+  // continuation. Omit these unfinished turns from replay; retain the source log.
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role === 'assistant' && !message.content.some(block =>
+      block.type === 'toolCall' || (block.type === 'text' && block.text.trim()))) messages.splice(index, 1);
+  }
+  // Codex can retry after retaining completed items from an interrupted response.
+  // Responses history ending in assistant text is not an Anthropic prefill request.
+  // Keep that history and explicitly request continuation. Pi closes orphaned tool
+  // calls with tool results, so those already supply the required user boundary.
+  const lastConversationMessage = messages.findLast(message => message.role !== 'system');
+  if (lastConversationMessage?.role === 'assistant' && !lastConversationMessage.content.some(block => block.type === 'toolCall')) {
+    messages.push({ role: 'user', content: [{ type: 'text', text: 'Continue from the previous assistant response. Follow the existing instructions and complete the pending request.' }], timestamp: Date.now() });
+  }
   const systemPrompt = [request.instructions || '', toolInstructions(toolMap, request.tool_choice, hasPlanner)].filter(Boolean).join('\n\n');
   return { context: { systemPrompt, messages, tools }, custom, toolMap,
     options: { reasoning: effort === 'none' ? undefined : effort, toolChoice: request.tool_choice,
@@ -195,7 +211,14 @@ export function createBridge({ registry, token, codec, requestTimeoutMs = 600000
     if (req.method !== 'POST' || path !== '/v1/responses') return json(res, 404, { error: { message: 'Unsupported endpoint.' } });
     const controller = new AbortController();
     controllers.add(controller);
-    const timer = setTimeout(() => controller.abort(new Error('Request timed out.')), requestTimeoutMs);
+    // Bound inactivity, not total generation time. Long tool inputs and thinking
+    // can stream for more than ten minutes. Local SSE heartbeats do not count.
+    let timer;
+    const resetIdleTimeout = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => controller.abort(new Error('Provider idle timeout: no model activity for ' + requestTimeoutMs / 1000 + ' seconds.')), requestTimeoutMs);
+    };
+    resetIdleTimeout();
     const abort = () => { if (!res.writableEnded) controller.abort(new Error('Client disconnected.')); };
     req.on('aborted', abort); res.on('close', abort);
     let heartbeat;
@@ -270,8 +293,11 @@ export function createBridge({ registry, token, codec, requestTimeoutMs = 600000
         emit('response.output_item.done', { output_index: state.output_index, item });
       };
       let complete = false;
-      for await (const event of registry.streamSimple(model, context, { ...options, signal: controller.signal })) {
+      // Pi defaults to no retries. Use its provider retry policy, which honors
+      // Retry-After and cancellation and only retries before response streaming.
+      for await (const event of registry.streamSimple(model, context, { ...options, maxRetries: 2, signal: controller.signal })) {
         if (controller.signal.aborted) throw controller.signal.reason;
+        resetIdleTimeout();
         if (event.type === 'error') throw new Error(event.error.errorMessage || 'Provider request failed.');
         if (event.type === 'done') {
           if (process.env.CODEX_PI_DEBUG) console.error(`[pi-codex] done reason=${event.reason} output_tokens=${event.message.usage.output}`);
