@@ -1,11 +1,13 @@
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import { randomUUID, randomBytes, createCipheriv, createDecipheriv, timingSafeEqual, createHash } from 'node:crypto';
+import { forwardOpenAI } from './routing.mjs';
+import { mergeCatalogs } from './model-catalog.mjs';
+import { fromResponses, toAnthropic } from './history.mjs';
 
 export class RequestError extends Error {
   constructor(message, status = 400) { super(message); this.status = status; }
 }
-const emptyUsage = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
 const instructions = readFileSync(new URL('./codex-instructions.md', import.meta.url), 'utf8');
 const wireName = (name, namespace) => 'tool_' + createHash('sha256').update(JSON.stringify([namespace || null, name])).digest('hex').slice(0, 32);
 
@@ -70,20 +72,6 @@ export function catalog(models) {
   })) };
 }
 
-function parts(value) {
-  if (typeof value === 'string') return [{ type: 'text', text: value }];
-  if (!Array.isArray(value)) throw new RequestError('Message content must be text or an array.');
-  return value.map(part => {
-    if (['input_text', 'output_text', 'text'].includes(part.type) && typeof part.text === 'string') return { type: 'text', text: part.text };
-    if (part.type === 'input_image') {
-      const match = /^data:(image\/[\w.+-]+);base64,([A-Za-z0-9+/=\s]+)$/.exec(part.image_url || '');
-      if (!match) throw new RequestError('Images must use base64 data URLs. Remote image URLs and file IDs are not supported.');
-      return { type: 'image', mimeType: match[1], data: match[2] };
-    }
-    throw new RequestError(`Unsupported message content: ${part.type}`);
-  });
-}
-
 export function translate(request, model, codec) {
   if (request.previous_response_id) throw new RequestError('Send full input history; previous_response_id is not supported.');
   if (request.background) throw new RequestError('Background Responses jobs are not supported.');
@@ -109,48 +97,9 @@ export function translate(request, model, codec) {
       : tool.parameters || { type: 'object', properties: {} } };
   });
   if (request.tool_choice && !['auto', 'none'].includes(request.tool_choice)) throw new RequestError('Only auto and none tool choices are supported.');
-  const messages = [];
-  const toolNames = new Map();
-  const assistant = () => {
-    if (messages.at(-1)?.role !== 'assistant') messages.push({ role: 'assistant', content: [], api: model.api, provider: model.provider, model: model.id, usage: emptyUsage(), stopReason: 'stop', timestamp: Date.now() });
-    return messages.at(-1);
-  };
-  const input = typeof request.input === 'string' ? [{ role: 'user', content: request.input }] : request.input || [];
-  for (const item of input) {
-    if (item.type === 'reasoning') {
-      if (!item.encrypted_content) throw new RequestError('Reasoning state is missing. Start a new conversation with this bridge.');
-      const restored = codec.open(item.encrypted_content);
-      const msg = assistant();
-      const slash = restored.model.indexOf('/');
-      msg.provider = restored.model.slice(0, slash);
-      msg.model = restored.model.slice(slash + 1);
-      msg.content.push(restored.block);
-    } else if (['function_call', 'custom_tool_call'].includes(item.type)) {
-      let args;
-      try { args = item.type === 'custom_tool_call' ? { input: item.input } : JSON.parse(item.arguments || '{}'); }
-      catch { throw new RequestError(`Invalid arguments for ${item.name}`); }
-      if (!args || typeof args !== 'object' || Array.isArray(args)) throw new RequestError('Tool arguments must be a JSON object.');
-      const name = wireName(item.name, item.namespace);
-      toolNames.set(item.call_id, name);
-      const msg = assistant();
-      msg.content.push({ type: 'toolCall', id: item.call_id, name, arguments: args });
-      msg.stopReason = 'toolUse';
-    } else if (['function_call_output', 'custom_tool_call_output'].includes(item.type)) {
-      const name = toolNames.get(item.call_id);
-      if (!name) throw new RequestError(`No preceding tool call for ${item.call_id}`);
-      messages.push({ role: 'toolResult', toolCallId: item.call_id, toolName: name, content: parts(item.output), isError: false, timestamp: Date.now() });
-    } else if (item.role === 'assistant') {
-      const body = parts(item.content);
-      if (body.some(part => part.type !== 'text')) throw new RequestError('Assistant images are not supported.');
-      assistant().content.push(...body);
-    } else if (item.role === 'system' || item.role === 'developer') {
-      const body = parts(item.content);
-      if (body.some(part => part.type !== 'text')) throw new RequestError('System messages must be text.');
-      messages.push({ role: 'system', content: body, timestamp: Date.now() });
-    } else if (item.role === 'user') {
-      messages.push({ role: 'user', content: parts(item.content), timestamp: Date.now() });
-    } else throw new RequestError(`Unsupported input item: ${item.type}`);
-  }
+  let messages;
+  try { messages = toAnthropic(fromResponses(request.input ?? []), model, { codec, toolName: wireName }); }
+  catch (error) { throw new RequestError(error.message); }
   const effort = request.reasoning?.effort ?? 'medium';
   if (!['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(effort)) throw new RequestError(`Unsupported reasoning effort: ${effort}`);
   // Codex persists completed items in event arrival order. Keep signed thinking first
@@ -198,16 +147,16 @@ function outputItem(block, id, custom, toolMap, codec, model, final, showReasoni
 
 function json(res, status, body) { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); }
 
-export function createBridge({ registry, token, codec, requestTimeoutMs = 600000 }) {
-  const expected = Buffer.from(`Bearer ${token}`);
+export function createBridge({ registry, token, codec, requestTimeoutMs = 600000, openai }) {
+  const expected = Buffer.from(token);
   const controllers = new Set();
   const server = http.createServer(async (req, res) => {
-    const auth = Buffer.from(req.headers.authorization || '');
+    const auth = Buffer.from(req.headers['x-codex-bridge-token'] || (req.headers.authorization || '').replace(/^Bearer /, ''));
     if (auth.length !== expected.length || !timingSafeEqual(auth, expected)) return json(res, 401, { error: { message: 'Bridge authentication required.' } });
     const path = new URL(req.url, 'http://localhost').pathname;
     const models = () => registry.getAvailable().filter(model => model.provider === 'anthropic');
     if (req.method === 'GET' && path === '/health') return json(res, 200, { service: 'codex-claude-bridge', version: 2 });
-    if (req.method === 'GET' && path === '/v1/models') return json(res, 200, catalog(models()));
+    if (req.method === 'GET' && path === '/v1/models') return json(res, 200, mergeCatalogs(catalog(models()), openai?.catalog || { models: [] }));
     if (req.method !== 'POST' || path !== '/v1/responses') return json(res, 404, { error: { message: 'Unsupported endpoint.' } });
     const controller = new AbortController();
     controllers.add(controller);
@@ -233,6 +182,11 @@ export function createBridge({ registry, token, codec, requestTimeoutMs = 600000
       }
       let request;
       try { request = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new RequestError('Invalid JSON.'); }
+      if (openai?.catalog.models.some(entry => entry.slug === request.model?.replace(/^openai\//, ''))) {
+        if (!req.headers['x-codex-bridge-token'] || req.headers.authorization === `Bearer ${token}`) throw new RequestError('OpenAI requests require Codex authentication and the bridge token.', 401);
+        await forwardOpenAI({ request, headers: req.headers, response: res, signal: controller.signal, onActivity: resetIdleTimeout, ...openai });
+        return;
+      }
       const model = models().find(model => `${model.provider}/${model.id}` === request.model);
       if (!model) throw new RequestError('Model is unavailable. Check Pi login and the selected model.', 404);
       const { context, custom, toolMap, options } = translate(request, model, codec);
@@ -255,7 +209,8 @@ export function createBridge({ registry, token, codec, requestTimeoutMs = 600000
       const blocks = new Map();
       const start = (index, block) => {
         if (blocks.has(index)) return blocks.get(index);
-        const state = { id: `${block.type === 'thinking' ? 'rs' : block.type === 'text' ? 'msg' : 'fc'}_${randomUUID()}`, output_index: blocks.size, ended: false, customInput: '' };
+        const prefix = block.type === 'thinking' ? 'rs' : block.type === 'text' ? 'msg' : custom.has(block.name) ? 'ctc' : 'fc';
+        const state = { id: `${prefix}_${randomUUID()}`, output_index: blocks.size, ended: false, customInput: '' };
         blocks.set(index, state);
         emit('response.output_item.added', { output_index: state.output_index, item: outputItem(block, state.id, custom, toolMap, codec, request.model, false, showReasoning) });
         if (block.type === 'text') emit('response.content_part.added', { item_id: state.id, output_index: state.output_index, content_index: 0, part: { type: 'output_text', text: '', annotations: [] } });

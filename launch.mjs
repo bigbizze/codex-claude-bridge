@@ -80,9 +80,20 @@ async function main() {
   if (readFileSync(keyFile).length !== 32) throw new Error('The bridge reasoning key must contain 32 bytes.');
   chmodSync(keyFile, 0o600);
   runtimeDir = mkdtempSync(join(tmpdir(), 'codex-claude-'));
+  const nativeModels = child('codex', ['-c', 'model_provider="openai"', 'debug', 'models', '--bundled'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let nativeCatalogText = '';
+  let nativeCatalogError = '';
+  nativeModels.process.stdout.on('data', chunk => { nativeCatalogText += chunk; });
+  nativeModels.process.stderr.on('data', chunk => { nativeCatalogError += chunk; });
+  if (await nativeModels.result !== 0) throw new Error(`Cannot load OpenAI models: ${nativeCatalogError}`);
+  const nativeCatalog = JSON.parse(nativeCatalogText);
+  const openaiCatalog = { models: Array.isArray(nativeCatalog) ? nativeCatalog : nativeCatalog.models };
+  if (!Array.isArray(openaiCatalog.models) || !openaiCatalog.models.length) throw new Error('Codex returned an empty OpenAI model catalog.');
+  const openaiCatalogFile = join(runtimeDir, 'openai-models.json');
+  writeFileSync(openaiCatalogFile, JSON.stringify(openaiCatalog), { mode: 0o600 });
   const token = randomBytes(32).toString('hex');
   const readyFile = join(runtimeDir, 'ready.json');
-  const env = { ...process.env, CODEX_PI_BRIDGE_TOKEN: token, CODEX_PI_STATE_KEY_FILE: keyFile, CODEX_PI_READY_FILE: readyFile };
+  const env = { ...process.env, CODEX_PI_BRIDGE_TOKEN: token, CODEX_PI_STATE_KEY_FILE: keyFile, CODEX_PI_READY_FILE: readyFile, CODEX_PI_OPENAI_CATALOG: openaiCatalogFile };
   const pi = child('pi', ['--mode', 'rpc', '--no-session', '--no-extensions', '-e', join(here, 'extension.ts'),
     '--no-skills', '--no-context-files', '--no-prompt-templates', '--no-themes', '--no-tools', '--model', model],
     { env, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -106,7 +117,8 @@ async function main() {
     '-c', 'model_providers.pi_claude.name="Pi Claude"',
     '-c', `model_providers.pi_claude.base_url="http://127.0.0.1:${ready.port}/v1"`,
     '-c', 'model_providers.pi_claude.wire_api="responses"',
-    '-c', 'model_providers.pi_claude.env_key="CODEX_PI_BRIDGE_TOKEN"',
+    '-c', 'model_providers.pi_claude.requires_openai_auth=true',
+    '-c', 'model_providers.pi_claude.env_http_headers={"x-codex-bridge-token"="CODEX_PI_BRIDGE_TOKEN"}',
     '-c', 'model_providers.pi_claude.supports_websockets=false',
     '-c', `model_catalog_json=${JSON.stringify(catalogFile)}`,
     '-c', 'model_reasoning_effort="medium"',
@@ -124,7 +136,9 @@ async function main() {
     const parsed = JSON.parse(output);
     const entry = (Array.isArray(parsed) ? parsed : parsed.models).find(item => item.slug === model);
     if (!entry) throw new Error('Codex did not load the Claude catalog.');
-    console.log(`Ready: ${model}; medium effort; context ${entry.context_window}; authenticated loopback proxy.`);
+    const missing = openaiCatalog.models.filter(item => !(Array.isArray(parsed) ? parsed : parsed.models).some(loaded => loaded.slug === `openai/${item.slug}`));
+    if (missing.length) throw new Error(`Codex did not load OpenAI models: ${missing.map(item => item.slug).join(', ')}`);
+    console.log(`Ready: ${model}; medium effort; context ${entry.context_window}; ${openaiCatalog.models.length} OpenAI models; authenticated loopback proxy.`);
     return 0;
   }
   const clientArgs = switching ? await handoff([...config.slice(0, -2), '-c', `model=${JSON.stringify(model)}`], env) : userArgs;

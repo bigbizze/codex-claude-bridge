@@ -61,6 +61,22 @@ test('rejects partial, ambiguous, unsupported and rolled-back histories', () => 
   assert.doesNotThrow(() => projectRollout(rollout([event('task_started'), event('task_complete')]), sourceId));
 });
 
+test('aborted tool calls retain evidence and unknown outcomes without blocking completed later turns', () => {
+  for (const type of ['function_call', 'custom_tool_call']) {
+    const history = [event('task_started'), row({ type, call_id: 'interrupted', name: 'shell', arguments: '{}' }), event('turn_aborted')];
+    const state = projectRollout(rollout([...history, event('task_started'), row(message('assistant', 'Later answer')), event('task_complete')]), sourceId);
+    assert.match(JSON.stringify(state.items), /interrupted has no recorded result/);
+    assert.match(JSON.stringify(state.items), /Execution outcome is unknown/);
+    assert.match(JSON.stringify(state.items), /Later answer/);
+    assert.equal(state.counts.toolRecords, 1);
+    const lateOutput = projectRollout(rollout([...history, row({ type: `${type}_output`, call_id: 'interrupted', output: 'Late result' })]), sourceId);
+    assert.match(JSON.stringify(lateOutput.items), /Late result/);
+    assert.doesNotMatch(JSON.stringify(lateOutput.items), /has no recorded result/);
+    assert.throws(() => projectRollout(rollout([...history, event('task_started')]), sourceId), /unfinished/);
+    assert.throws(() => projectRollout(rollout([...history, event('task_started'), row({ type, call_id: 'unfinished', name: 'shell', arguments: '{}' }), event('task_complete')]), sourceId), /unfinished/);
+  }
+});
+
 test('compaction preserves available full history and readable summaries, not provider blobs', () => {
   const state = projectRollout(rollout([
     row(message('assistant', 'Original decision')),

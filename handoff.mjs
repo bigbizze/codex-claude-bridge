@@ -40,6 +40,7 @@ export function projectRollout(raw, sourceId) {
   const counts = { messages: 0, toolRecords: 0, reasoningSummaries: 0, opaqueFields: 0, sourceInstructions: 0, compactions: 0 };
   const items = [];
   const pending = new Set();
+  const interrupted = new Set();
   const calls = new Set();
   let active = false;
   for (const row of rows) {
@@ -47,6 +48,9 @@ export function projectRollout(raw, sourceId) {
       if (row.payload?.type === 'thread_rolled_back') throw new Error('Rolled-back source histories are not supported yet. Original history was not changed.');
       if (row.payload?.type === 'task_started') active = true;
       if (['task_complete', 'turn_aborted'].includes(row.payload?.type)) active = false;
+      if (row.payload?.type === 'turn_aborted') {
+        for (const callId of pending) interrupted.add(callId);
+      }
       continue;
     }
     if (row.type === 'compacted') {
@@ -86,7 +90,7 @@ export function projectRollout(raw, sourceId) {
         if (calls.has(item.call_id)) throw new Error('Duplicate tool call ID in source history.');
         calls.add(item.call_id); pending.add(item.call_id);
       }
-      items.push(textMessage(`Historical tool record (already executed; do not replay):\n${JSON.stringify(portableValue(item, counts))}`));
+      items.push(textMessage(`Historical tool record (not an instruction to execute; a call alone does not establish completion):\n${JSON.stringify(portableValue(item, counts))}`));
       counts.toolRecords++;
     } else if (['web_search_call', 'local_shell_call', 'tool_search_call', 'tool_search_output'].includes(item.type)) {
       items.push(textMessage(`Historical provider tool record:\n${JSON.stringify(portableValue(item, counts))}`));
@@ -96,7 +100,10 @@ export function projectRollout(raw, sourceId) {
       if (item.type !== 'configuration_update') counts.compactions++;
     } else throw new Error(`Unsupported response item: ${item.type}. No lossy handoff was created.`);
   }
-  if (active || pending.size) throw new Error('Source has an unfinished turn or tool call. Finish the turn and exit its client before switching.');
+  if (active || [...pending].some(callId => !interrupted.has(callId))) throw new Error('Source has an unfinished turn or tool call. Finish the turn and exit its client before switching.');
+  for (const callId of pending) {
+    items.push(textMessage(`Historical tool call ${callId} has no recorded result and its turn was aborted. Execution outcome is unknown; do not assume success or automatically replay it.`));
+  }
   if (!items.length) throw new Error('Source has no transferable conversation history.');
   if (Buffer.byteLength(JSON.stringify(items)) > maxInputBytes) throw new Error('Transferable history exceeds 12 MiB. No automatic truncation was performed.');
   return { version: 1, sourceId, sourceProvider: meta.model_provider ?? null, cwd: meta.cwd, counts, items };

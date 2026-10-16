@@ -270,6 +270,7 @@ test('custom calls and signed reasoning survive a complete response and replay',
   const data = events(await response.text());
   const output = data.at(-1).response.output;
   assert.equal(output[1].type, 'custom_tool_call');
+  assert.match(output[1].id, /^ctc_/);
   assert.equal(output[1].namespace, 'functions');
   assert.equal(output[1].input, 'patch content');
   const replay = translate({ model: modelId, tools, input: [...output, { type: 'custom_tool_call_output', call_id: 'call_patch', output: 'ok' }] }, model, codec);
