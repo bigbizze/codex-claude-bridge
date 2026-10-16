@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { createBridge, createCodec, catalog } from './bridge.mjs';
-import { mergeCatalogs } from './routing.mjs';
+import { mergeCatalogs } from './model-catalog.mjs';
 
 export default function (pi: any) {
   let bridge: ReturnType<typeof createBridge> | undefined;

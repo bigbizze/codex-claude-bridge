@@ -136,7 +136,7 @@ async function main() {
     const parsed = JSON.parse(output);
     const entry = (Array.isArray(parsed) ? parsed : parsed.models).find(item => item.slug === model);
     if (!entry) throw new Error('Codex did not load the Claude catalog.');
-    const missing = openaiCatalog.models.filter(item => !(Array.isArray(parsed) ? parsed : parsed.models).some(loaded => loaded.slug === item.slug));
+    const missing = openaiCatalog.models.filter(item => !(Array.isArray(parsed) ? parsed : parsed.models).some(loaded => loaded.slug === `openai/${item.slug}`));
     if (missing.length) throw new Error(`Codex did not load OpenAI models: ${missing.map(item => item.slug).join(', ')}`);
     console.log(`Ready: ${model}; medium effort; context ${entry.context_window}; ${openaiCatalog.models.length} OpenAI models; authenticated loopback proxy.`);
     return 0;

@@ -1,17 +1,8 @@
 import { once } from 'node:events';
 import { fromResponses, toOpenAI } from './history.mjs';
 
-export function mergeCatalogs(claude, openai) {
-  const models = new Map();
-  for (const entry of [...claude.models, ...openai.models]) {
-    if (models.has(entry.slug)) throw new Error(`Duplicate model in bridge catalog: ${entry.slug}`);
-    models.set(entry.slug, entry);
-  }
-  return { models: [...models.values()] };
-}
-
 export function openaiRequest(request) {
-  return { ...request, input: toOpenAI(fromResponses(request.input ?? [])) };
+  return { ...request, model: request.model?.replace(/^openai\//, ''), input: toOpenAI(fromResponses(request.input ?? [])) };
 }
 
 export async function forwardOpenAI({ request, headers, response, signal, onActivity, fetchImpl = fetch, baseUrl }) {

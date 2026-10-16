@@ -8,7 +8,7 @@ import { once } from 'node:events';
 import { execFileSync } from 'node:child_process';
 import { AppServer } from './app-server.mjs';
 import { createBridge, createCodec, catalog } from './bridge.mjs';
-import { mergeCatalogs } from './routing.mjs';
+import { mergeCatalogs } from './model-catalog.mjs';
 
 for (const authentication of ['api', 'chatgpt']) {
 test(`real Codex lists both providers and switches the same persisted thread with ${authentication} authentication`, { skip: process.env.CODEX_ROUTING_INTEGRATION !== '1', timeout: 60000 }, async t => {
@@ -80,13 +80,13 @@ test(`real Codex lists both providers and switches the same persisted thread wit
   await client.initialize();
   const models = await client.call('model/list', {});
   assert.ok(models.data.some(entry => entry.model === modelId));
-  assert.ok(models.data.some(entry => entry.model === openaiModel.slug));
+  assert.ok(models.data.some(entry => entry.model === `openai/${openaiModel.slug}`));
   const source = (await client.call('thread/start', { cwd: dir })).thread;
   await client.call('thread/inject_items', { threadId: source.id, items: [
     { type: 'custom_tool_call', id: 'fc_legacy_bridge_patch', call_id: 'legacy_patch', name: 'apply_patch', namespace: 'functions', input: 'Historical patch, already applied' },
     { type: 'custom_tool_call_output', call_id: 'legacy_patch', output: 'Historical patch completed' },
   ] });
-  for (const [index, selected] of [modelId, openaiModel.slug, openaiModel.slug, modelId].entries()) {
+  for (const [index, selected] of [modelId, `openai/${openaiModel.slug}`, `openai/${openaiModel.slug}`, modelId].entries()) {
     if (index === 3) {
       await client.close();
       client = new AppServer(args, { env, cwd: dir });

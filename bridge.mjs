@@ -1,7 +1,8 @@
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import { randomUUID, randomBytes, createCipheriv, createDecipheriv, timingSafeEqual, createHash } from 'node:crypto';
-import { forwardOpenAI, mergeCatalogs } from './routing.mjs';
+import { forwardOpenAI } from './routing.mjs';
+import { mergeCatalogs } from './model-catalog.mjs';
 import { fromResponses, toAnthropic } from './history.mjs';
 
 export class RequestError extends Error {
@@ -181,7 +182,7 @@ export function createBridge({ registry, token, codec, requestTimeoutMs = 600000
       }
       let request;
       try { request = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new RequestError('Invalid JSON.'); }
-      if (openai?.catalog.models.some(entry => entry.slug === request.model)) {
+      if (openai?.catalog.models.some(entry => entry.slug === request.model?.replace(/^openai\//, ''))) {
         if (!req.headers['x-codex-bridge-token'] || req.headers.authorization === `Bearer ${token}`) throw new RequestError('OpenAI requests require Codex authentication and the bridge token.', 401);
         await forwardOpenAI({ request, headers: req.headers, response: res, signal: controller.signal, onActivity: resetIdleTimeout, ...openai });
         return;

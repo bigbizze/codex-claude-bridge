@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { createBridge, createCodec, translate } from './bridge.mjs';
-import { mergeCatalogs, openaiRequest } from './routing.mjs';
+import { openaiRequest } from './routing.mjs';
 
 const model = { provider: 'anthropic', id: 'claude-test', api: 'anthropic-messages' };
 const modelId = 'anthropic/claude-test';
@@ -11,13 +11,6 @@ const codec = createCodec(randomBytes(32));
 const thinking = { type: 'thinking', thinking: 'Original thought', thinkingSignature: 'original-signature' };
 const claudeReasoning = { type: 'reasoning', id: 'rs_claude', encrypted_content: codec.seal(thinking, modelId), summary: [{ type: 'summary_text', text: 'Claude summary' }] };
 const openaiReasoning = { type: 'reasoning', id: 'rs_openai', encrypted_content: 'openai-opaque', summary: [{ type: 'summary_text', text: 'OpenAI summary' }] };
-
-test('model catalog combines exact native OpenAI entries with Claude entries', () => {
-  const claude = { slug: modelId };
-  const openai = { slug: 'gpt-6-astra', visibility: 'list', context_window: 400000, supported_reasoning_levels: [{ effort: 'max' }] };
-  assert.deepEqual(mergeCatalogs({ models: [claude] }, { models: [openai] }).models, [claude, openai]);
-  assert.throws(() => mergeCatalogs({ models: [openai] }, { models: [openai] }), /Duplicate/);
-});
 
 test('outgoing projections preserve original state across both providers and new messages', () => {
   const input = [
@@ -83,7 +76,7 @@ test('OpenAI routing uses native authentication, filters history, streams respon
   t.after(() => bridge.close());
   const url = `http://127.0.0.1:${bridge.server.address().port}`;
   const headers = { 'x-codex-bridge-token': 'local-secret', authorization: 'Bearer native-token', 'chatgpt-account-id': 'test-account', 'content-type': 'application/json' };
-  const response = await fetch(`${url}/v1/responses`, { method: 'POST', headers, body: JSON.stringify({ model: 'gpt-6-astra', stream: true, input: [claudeReasoning, openaiReasoning] }) });
+  const response = await fetch(`${url}/v1/responses`, { method: 'POST', headers, body: JSON.stringify({ model: 'openai/gpt-6-astra', stream: true, input: [claudeReasoning, openaiReasoning] }) });
   assert.equal(await response.text(), stream);
   assert.equal(response.headers.get('x-codex-primary-used-percent'), '42');
   assert.equal(calls[0].url, 'https://chatgpt.com/backend-api/codex/responses');
@@ -92,8 +85,9 @@ test('OpenAI routing uses native authentication, filters history, streams respon
   assert.equal(calls[0].options.headers.has('x-codex-bridge-token'), false);
   assert.doesNotMatch(calls[0].options.body, /pi1\./);
   assert.match(calls[0].options.body, /openai-opaque/);
+  assert.equal(JSON.parse(calls[0].options.body).model, 'gpt-6-astra');
   const models = await (await fetch(`${url}/v1/models`, { headers })).json();
-  assert.deepEqual(models.models.map(entry => entry.slug), [modelId, 'gpt-6-astra']);
+  assert.deepEqual(new Set(models.models.map(entry => entry.slug)), new Set([modelId, 'openai/gpt-6-astra']));
   for (const auth of [{ authorization: 'Bearer native-token' }, { authorization: 'Bearer local-secret' }, { ...headers, 'x-codex-bridge-token': 'wrong' }]) {
     const rejected = await fetch(`${url}/v1/responses`, { method: 'POST', headers: auth, body: JSON.stringify({ model: 'gpt-6-astra', input: 'Hi' }) });
     assert.equal(rejected.status, 401);

@@ -67,12 +67,22 @@ Medium remains the default. Restart the bridge to load an updated picker.
 
 ## Switch providers
 
-Use `/model` and choose an OpenAI model such as `gpt-6-astra`, or choose an
+Use `/model` and choose an OpenAI model such as `openai/gpt-6-astra`, or choose an
 `anthropic/` model to switch back. Finish or interrupt the current turn first.
 The bridge routes the next request to the selected provider without creating
 a new conversation. OpenAI model names, context limits, instructions, and effort
 choices come from the installed Codex binary's bundled catalog. Upgrade Codex
 and restart the bridge to update that list.
+
+Picker names are the exact provider-prefixed slugs (`anthropic/claude-opus-5-5`,
+`openai/gpt-6-astra`). The order is latest Anthropic families (Fable, Opus,
+Sonnet, Haiku), latest OpenAI families in the newest available GPT generation
+(Astra, Sol, Terra, Luna where present), then older Anthropic models and older
+OpenAI models. Anthropic families use descending versions; older OpenAI models
+retain their native catalog priority. Latest entries are selected from available
+models, not a fixed list of releases. Hidden models remain hidden. The bridge
+strips `openai/` for upstream requests; existing sessions using unprefixed OpenAI
+slugs still work.
 
 For an existing bridge conversation, exit its old client and resume through the
 updated launcher, then use `/model`:
