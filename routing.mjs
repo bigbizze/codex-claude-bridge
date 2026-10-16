@@ -1,4 +1,5 @@
 import { once } from 'node:events';
+import { fromResponses, toOpenAI } from './history.mjs';
 
 export function mergeCatalogs(claude, openai) {
   const models = new Map();
@@ -10,13 +11,7 @@ export function mergeCatalogs(claude, openai) {
 }
 
 export function openaiRequest(request) {
-  if (!Array.isArray(request.input)) return request;
-  return { ...request, input: request.input.flatMap(item => {
-    if (item.type === 'custom_tool_call' && item.id?.startsWith('fc_')) return [{ ...item, id: `ctc_${item.id.slice(3)}` }];
-    if (item.type !== 'reasoning' || !item.encrypted_content?.startsWith('pi1.')) return [item];
-    const text = (item.summary || []).filter(part => part.type === 'summary_text').map(part => part.text).join('\n');
-    return text ? [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: `Historical reasoning summary:\n${text}` }] }] : [];
-  }) };
+  return { ...request, input: toOpenAI(fromResponses(request.input ?? [])) };
 }
 
 export async function forwardOpenAI({ request, headers, response, signal, onActivity, fetchImpl = fetch, baseUrl }) {

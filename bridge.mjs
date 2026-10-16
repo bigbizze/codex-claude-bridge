@@ -2,11 +2,11 @@ import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import { randomUUID, randomBytes, createCipheriv, createDecipheriv, timingSafeEqual, createHash } from 'node:crypto';
 import { forwardOpenAI, mergeCatalogs } from './routing.mjs';
+import { fromResponses, toAnthropic } from './history.mjs';
 
 export class RequestError extends Error {
   constructor(message, status = 400) { super(message); this.status = status; }
 }
-const emptyUsage = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
 const instructions = readFileSync(new URL('./codex-instructions.md', import.meta.url), 'utf8');
 const wireName = (name, namespace) => 'tool_' + createHash('sha256').update(JSON.stringify([namespace || null, name])).digest('hex').slice(0, 32);
 
@@ -71,20 +71,6 @@ export function catalog(models) {
   })) };
 }
 
-function parts(value) {
-  if (typeof value === 'string') return [{ type: 'text', text: value }];
-  if (!Array.isArray(value)) throw new RequestError('Message content must be text or an array.');
-  return value.map(part => {
-    if (['input_text', 'output_text', 'text'].includes(part.type) && typeof part.text === 'string') return { type: 'text', text: part.text };
-    if (part.type === 'input_image') {
-      const match = /^data:(image\/[\w.+-]+);base64,([A-Za-z0-9+/=\s]+)$/.exec(part.image_url || '');
-      if (!match) throw new RequestError('Images must use base64 data URLs. Remote image URLs and file IDs are not supported.');
-      return { type: 'image', mimeType: match[1], data: match[2] };
-    }
-    throw new RequestError(`Unsupported message content: ${part.type}`);
-  });
-}
-
 export function translate(request, model, codec) {
   if (request.previous_response_id) throw new RequestError('Send full input history; previous_response_id is not supported.');
   if (request.background) throw new RequestError('Background Responses jobs are not supported.');
@@ -110,52 +96,9 @@ export function translate(request, model, codec) {
       : tool.parameters || { type: 'object', properties: {} } };
   });
   if (request.tool_choice && !['auto', 'none'].includes(request.tool_choice)) throw new RequestError('Only auto and none tool choices are supported.');
-  const messages = [];
-  const toolNames = new Map();
-  const assistant = () => {
-    if (messages.at(-1)?.role !== 'assistant') messages.push({ role: 'assistant', content: [], api: model.api, provider: model.provider, model: model.id, usage: emptyUsage(), stopReason: 'stop', timestamp: Date.now() });
-    return messages.at(-1);
-  };
-  const input = typeof request.input === 'string' ? [{ role: 'user', content: request.input }] : request.input || [];
-  for (const item of input) {
-    if (item.type === 'reasoning') {
-      const restored = item.encrypted_content?.startsWith('pi1.') ? codec.open(item.encrypted_content) : null;
-      if (restored) {
-        const message = assistant();
-        const slash = restored.model.indexOf('/');
-        message.provider = restored.model.slice(0, slash);
-        message.model = restored.model.slice(slash + 1);
-        message.content.push(restored.block);
-      } else {
-        const summary = (item.summary || []).filter(part => part.type === 'summary_text').map(part => part.text).join('\n');
-        if (summary) assistant().content.push({ type: 'text', text: `Historical reasoning summary:\n${summary}` });
-      }
-    } else if (['function_call', 'custom_tool_call'].includes(item.type)) {
-      let args;
-      try { args = item.type === 'custom_tool_call' ? { input: item.input } : JSON.parse(item.arguments || '{}'); }
-      catch { throw new RequestError(`Invalid arguments for ${item.name}`); }
-      if (!args || typeof args !== 'object' || Array.isArray(args)) throw new RequestError('Tool arguments must be a JSON object.');
-      const name = wireName(item.name, item.namespace);
-      toolNames.set(item.call_id, name);
-      const msg = assistant();
-      msg.content.push({ type: 'toolCall', id: item.call_id, name, arguments: args });
-      msg.stopReason = 'toolUse';
-    } else if (['function_call_output', 'custom_tool_call_output'].includes(item.type)) {
-      const name = toolNames.get(item.call_id);
-      if (!name) throw new RequestError(`No preceding tool call for ${item.call_id}`);
-      messages.push({ role: 'toolResult', toolCallId: item.call_id, toolName: name, content: parts(item.output), isError: false, timestamp: Date.now() });
-    } else if (item.role === 'assistant') {
-      const body = parts(item.content);
-      if (body.some(part => part.type !== 'text')) throw new RequestError('Assistant images are not supported.');
-      assistant().content.push(...body);
-    } else if (item.role === 'system' || item.role === 'developer') {
-      const body = parts(item.content);
-      if (body.some(part => part.type !== 'text')) throw new RequestError('System messages must be text.');
-      messages.push({ role: 'system', content: body, timestamp: Date.now() });
-    } else if (item.role === 'user') {
-      messages.push({ role: 'user', content: parts(item.content), timestamp: Date.now() });
-    } else throw new RequestError(`Unsupported input item: ${item.type}`);
-  }
+  let messages;
+  try { messages = toAnthropic(fromResponses(request.input ?? []), model, { codec, toolName: wireName }); }
+  catch (error) { throw new RequestError(error.message); }
   const effort = request.reasoning?.effort ?? 'medium';
   if (!['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(effort)) throw new RequestError(`Unsupported reasoning effort: ${effort}`);
   // Codex persists completed items in event arrival order. Keep signed thinking first

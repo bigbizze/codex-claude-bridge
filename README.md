@@ -81,8 +81,9 @@ updated launcher, then use `/model`:
 codex-claude resume <session-id>
 ```
 
-The saved session retains both providers' original reasoning items. Each outgoing
-request omits the other provider's encrypted reasoning and keeps readable
+The saved session retains both providers' original reasoning items. Both routes
+import the active history into a provider-neutral canonical format, then use
+separate destination adapters. Each outgoing request omits the other provider's encrypted reasoning and keeps readable
 summaries as historical text. Legacy Claude custom-tool item IDs are normalized
 to OpenAI's `ctc_` prefix on outgoing requests; tool call/result associations and
 saved IDs are preserved. Switching back reuses the original reasoning items
@@ -92,6 +93,11 @@ Pi can normalize reasoning when changing between different Claude models.
 Normal Codex compaction can still replace old active context with a summary.
 The native session is not rewritten by the bridge, and the archival handoff's
 12 MiB limit does not apply to `/model` switching.
+
+The canonical format also imports Anthropic Messages and saved Claude Code and
+Codex transcripts while retaining all original fields and archive bytes. See
+[Canonical conversation history](HISTORY.md) for the schema, adapter contracts,
+and the distinction between lossless archives and active model input.
 
 OpenAI requests use Codex's authentication and refresh handling. The bridge sends
 them to the ChatGPT Codex endpoint for a ChatGPT login, or the OpenAI API for an
