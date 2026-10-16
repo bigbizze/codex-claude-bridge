@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import { randomUUID, randomBytes, createCipheriv, createDecipheriv, timingSafeEqual, createHash } from 'node:crypto';
+import { forwardOpenAI, mergeCatalogs } from './routing.mjs';
 
 export class RequestError extends Error {
   constructor(message, status = 400) { super(message); this.status = status; }
@@ -118,13 +119,17 @@ export function translate(request, model, codec) {
   const input = typeof request.input === 'string' ? [{ role: 'user', content: request.input }] : request.input || [];
   for (const item of input) {
     if (item.type === 'reasoning') {
-      if (!item.encrypted_content) throw new RequestError('Reasoning state is missing. Start a new conversation with this bridge.');
-      const restored = codec.open(item.encrypted_content);
-      const msg = assistant();
-      const slash = restored.model.indexOf('/');
-      msg.provider = restored.model.slice(0, slash);
-      msg.model = restored.model.slice(slash + 1);
-      msg.content.push(restored.block);
+      const restored = item.encrypted_content?.startsWith('pi1.') ? codec.open(item.encrypted_content) : null;
+      if (restored) {
+        const message = assistant();
+        const slash = restored.model.indexOf('/');
+        message.provider = restored.model.slice(0, slash);
+        message.model = restored.model.slice(slash + 1);
+        message.content.push(restored.block);
+      } else {
+        const summary = (item.summary || []).filter(part => part.type === 'summary_text').map(part => part.text).join('\n');
+        if (summary) assistant().content.push({ type: 'text', text: `Historical reasoning summary:\n${summary}` });
+      }
     } else if (['function_call', 'custom_tool_call'].includes(item.type)) {
       let args;
       try { args = item.type === 'custom_tool_call' ? { input: item.input } : JSON.parse(item.arguments || '{}'); }
@@ -198,16 +203,16 @@ function outputItem(block, id, custom, toolMap, codec, model, final, showReasoni
 
 function json(res, status, body) { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); }
 
-export function createBridge({ registry, token, codec, requestTimeoutMs = 600000 }) {
-  const expected = Buffer.from(`Bearer ${token}`);
+export function createBridge({ registry, token, codec, requestTimeoutMs = 600000, openai }) {
+  const expected = Buffer.from(token);
   const controllers = new Set();
   const server = http.createServer(async (req, res) => {
-    const auth = Buffer.from(req.headers.authorization || '');
+    const auth = Buffer.from(req.headers['x-codex-bridge-token'] || (req.headers.authorization || '').replace(/^Bearer /, ''));
     if (auth.length !== expected.length || !timingSafeEqual(auth, expected)) return json(res, 401, { error: { message: 'Bridge authentication required.' } });
     const path = new URL(req.url, 'http://localhost').pathname;
     const models = () => registry.getAvailable().filter(model => model.provider === 'anthropic');
     if (req.method === 'GET' && path === '/health') return json(res, 200, { service: 'codex-claude-bridge', version: 2 });
-    if (req.method === 'GET' && path === '/v1/models') return json(res, 200, catalog(models()));
+    if (req.method === 'GET' && path === '/v1/models') return json(res, 200, mergeCatalogs(catalog(models()), openai?.catalog || { models: [] }));
     if (req.method !== 'POST' || path !== '/v1/responses') return json(res, 404, { error: { message: 'Unsupported endpoint.' } });
     const controller = new AbortController();
     controllers.add(controller);
@@ -233,6 +238,11 @@ export function createBridge({ registry, token, codec, requestTimeoutMs = 600000
       }
       let request;
       try { request = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new RequestError('Invalid JSON.'); }
+      if (openai?.catalog.models.some(entry => entry.slug === request.model)) {
+        if (!req.headers['x-codex-bridge-token'] || req.headers.authorization === `Bearer ${token}`) throw new RequestError('OpenAI requests require Codex authentication and the bridge token.', 401);
+        await forwardOpenAI({ request, headers: req.headers, response: res, signal: controller.signal, onActivity: resetIdleTimeout, ...openai });
+        return;
+      }
       const model = models().find(model => `${model.provider}/${model.id}` === request.model);
       if (!model) throw new RequestError('Model is unavailable. Check Pi login and the selected model.', 404);
       const { context, custom, toolMap, options } = translate(request, model, codec);
@@ -255,7 +265,8 @@ export function createBridge({ registry, token, codec, requestTimeoutMs = 600000
       const blocks = new Map();
       const start = (index, block) => {
         if (blocks.has(index)) return blocks.get(index);
-        const state = { id: `${block.type === 'thinking' ? 'rs' : block.type === 'text' ? 'msg' : 'fc'}_${randomUUID()}`, output_index: blocks.size, ended: false, customInput: '' };
+        const prefix = block.type === 'thinking' ? 'rs' : block.type === 'text' ? 'msg' : custom.has(block.name) ? 'ctc' : 'fc';
+        const state = { id: `${prefix}_${randomUUID()}`, output_index: blocks.size, ended: false, customInput: '' };
         blocks.set(index, state);
         emit('response.output_item.added', { output_index: state.output_index, item: outputItem(block, state.id, custom, toolMap, codec, request.model, false, showReasoning) });
         if (block.type === 'text') emit('response.content_part.added', { item_id: state.id, output_index: state.output_index, content_index: 0, part: { type: 'output_text', text: '', annotations: [] } });
