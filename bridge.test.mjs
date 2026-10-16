@@ -354,3 +354,49 @@ test('streams a custom tool input before toolcall_end without duplicating the pr
   const deltas = events(text).filter(event => event.type === 'response.custom_tool_call_input.delta');
   assert.equal(deltas.map(event => event.delta).join(''), 'first line\nlast line');
 });
+
+test('completes commentary before a slow tool input so Codex restores working status', async t => {
+  let release;
+  const hold = new Promise(resolve => { release = resolve; });
+  t.after(() => release());
+  const { request } = await start(t, async function* (_model, context) {
+    const partial = assistant([{ type: 'text', text: 'I will write the file now.' }]);
+    yield { type: 'text_start', contentIndex: 0, partial };
+    yield { type: 'text_delta', contentIndex: 0, delta: partial.content[0].text, partial };
+    yield { type: 'text_end', contentIndex: 0, partial };
+    partial.content.push({ type: 'toolCall', id: 'patch1', name: context.tools[0].name, arguments: {} });
+    yield { type: 'toolcall_start', contentIndex: 1, partial };
+    await hold;
+    partial.content[1].arguments = { input: '*** Begin Patch\n*** End Patch' };
+    yield { type: 'toolcall_end', contentIndex: 1, partial };
+    yield { type: 'done', reason: 'toolUse', message: partial };
+  });
+  const response = await request({ stream: true, tools: [{ type: 'custom', name: 'apply_patch' }] });
+  const reader = response.body.getReader();
+  let text = '';
+  while (!text.includes('custom_tool_call')) text += new TextDecoder().decode((await reader.read()).value);
+  const data = events(text);
+  const commentary = data.find(event => event.type === 'response.output_item.done');
+  assert.equal(commentary.item.phase, 'commentary');
+  assert.equal(commentary.item.content[0].text, 'I will write the file now.');
+  assert.ok(data.indexOf(commentary) < data.findIndex(event => event.item?.type === 'custom_tool_call'));
+  assert.ok(!data.some(event => event.type === 'response.completed'));
+  release();
+  while (!(await reader.read()).done) {}
+});
+
+test('the last text of a stopped response is a final answer, with or without streaming block events', async t => {
+  for (const streamed of [true, false]) {
+    const { request } = await start(t, async function* () {
+      const partial = assistant([{ type: 'text', text: 'Finished.' }]);
+      if (streamed) {
+        yield { type: 'text_start', contentIndex: 0, partial };
+        yield { type: 'text_end', contentIndex: 0, partial };
+      }
+      yield { type: 'done', reason: 'stop', message: partial };
+    });
+    const data = events(await (await request({ stream: true })).text());
+    assert.equal(data.find(event => event.type === 'response.output_item.done').item.phase, 'final_answer');
+    assert.equal(data.at(-1).response.output[0].phase, 'final_answer');
+  }
+});

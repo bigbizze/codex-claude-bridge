@@ -222,6 +222,9 @@ node launch.mjs --check
 ```
 
 Restart `codex-claude` after the update. Your existing alias still works.
+Assistant text before a tool call is marked as commentary so Codex can show its
+working indicator while the tool input is generated. Final responses are marked
+as final answers.
 The bridge adds a user continuation message when a retry ends with retained
 assistant text. It omits unfinished thinking-only assistant turns from provider
 requests, because Claude rejects those turns. Existing conversation files are

@@ -135,8 +135,8 @@ function usage(value) {
     output_tokens_details: { reasoning_tokens: value.reasoning || 0 } };
 }
 
-function outputItem(block, id, custom, toolMap, codec, model, final, showReasoning) {
-  if (block.type === 'text') return { id, type: 'message', role: 'assistant', status: final ? 'completed' : 'in_progress', content: final ? [{ type: 'output_text', text: block.text, annotations: [] }] : [] };
+function outputItem(block, id, custom, toolMap, codec, model, final, showReasoning, phase = 'commentary') {
+  if (block.type === 'text') return { id, type: 'message', role: 'assistant', phase, status: final ? 'completed' : 'in_progress', content: final ? [{ type: 'output_text', text: block.text, annotations: [] }] : [] };
   if (block.type === 'thinking') return { id, type: 'reasoning', summary: final && showReasoning && !block.redacted ? [{ type: 'summary_text', text: block.thinking }] : [], ...(final ? { encrypted_content: codec.seal(block, model) } : {}) };
   if (block.type !== 'toolCall') throw new Error(`Unsupported provider block: ${block.type}`);
   const original = toolMap.get(block.name);
@@ -226,11 +226,11 @@ export function createBridge({ registry, token, codec, requestTimeoutMs = 600000
         if (delta) emit('response.custom_tool_call_input.delta', { item_id: state.id, output_index: state.output_index, delta });
         state.customInput = input;
       };
-      const finish = (index, block) => {
+      const finish = (index, block, phase = 'commentary') => {
         const state = start(index, block);
         if (state.ended) return;
         state.ended = true;
-        const item = outputItem(block, state.id, custom, toolMap, codec, request.model, true, showReasoning);
+        const item = outputItem(block, state.id, custom, toolMap, codec, request.model, true, showReasoning, phase);
         const fields = { item_id: state.id, output_index: state.output_index };
         if (block.type === 'text') {
           emit('response.output_text.done', { ...fields, content_index: 0, text: block.text });
@@ -248,15 +248,27 @@ export function createBridge({ registry, token, codec, requestTimeoutMs = 600000
         emit('response.output_item.done', { output_index: state.output_index, item });
       };
       let complete = false;
+      let pendingText;
+      const finishPendingText = (phase = 'commentary') => {
+        if (!pendingText) return;
+        finish(pendingText.index, pendingText.block, phase);
+        pendingText = undefined;
+      };
       // Pi defaults to no retries. Use its provider retry policy, which honors
       // Retry-After and cancellation and only retries before response streaming.
       for await (const event of registry.streamSimple(model, context, { ...options, maxRetries: 2, signal: controller.signal })) {
         if (controller.signal.aborted) throw controller.signal.reason;
         resetIdleTimeout();
-        if (event.type === 'error') throw new Error(event.error.errorMessage || 'Provider request failed.');
+        if (event.type === 'error') {
+          finishPendingText();
+          throw new Error(event.error.errorMessage || 'Provider request failed.');
+        }
         if (event.type === 'done') {
           if (process.env.CODEX_PI_DEBUG) console.error(`[pi-codex] done reason=${event.reason} output_tokens=${event.message.usage.output}`);
-          event.message.content.forEach((block, index) => finish(index, block));
+          const content = event.message.content;
+          const phaseAt = index => event.reason === 'stop' && index === content.length - 1 ? 'final_answer' : 'commentary';
+          if (pendingText) finishPendingText(phaseAt(pendingText.index));
+          content.forEach((block, index) => finish(index, block, phaseAt(index)));
           response.usage = usage(event.message.usage);
           response.status = event.reason === 'length' ? 'incomplete' : 'completed';
           if (event.reason === 'length') response.incomplete_details = { reason: 'max_output_tokens' };
@@ -265,6 +277,10 @@ export function createBridge({ registry, token, codec, requestTimeoutMs = 600000
           break;
         }
         if (event.contentIndex === undefined) continue;
+        // Claude supplies no message phase. The next block or stop reason tells
+        // us whether this text was commentary or the final answer. Complete it
+        // before announcing the next tool so Codex restores its working status.
+        if (pendingText && event.contentIndex !== pendingText.index) finishPendingText();
         const block = event.partial.content[event.contentIndex];
         if (!block) throw new Error('Provider event has no content block.');
         const state = start(event.contentIndex, block);
@@ -273,7 +289,8 @@ export function createBridge({ registry, token, codec, requestTimeoutMs = 600000
         if (event.type === 'thinking_delta' && showReasoning) emit('response.reasoning_summary_text.delta', { ...fields, summary_index: 0, delta: event.delta });
         if (event.type === 'toolcall_delta' && !custom.has(block.name)) emit('response.function_call_arguments.delta', { ...fields, delta: event.delta });
         if (event.type === 'toolcall_delta' && custom.has(block.name)) customDelta(state, block.arguments?.input);
-        if (event.type.endsWith('_end')) finish(event.contentIndex, block);
+        if (event.type === 'text_end') pendingText = { index: event.contentIndex, block: { ...block } };
+        else if (event.type.endsWith('_end')) finish(event.contentIndex, block);
       }
       if (!complete) throw new Error('Provider stream ended without a completion event.');
       if (request.stream) res.end(); else json(res, 200, response);
