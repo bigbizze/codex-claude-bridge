@@ -6,6 +6,7 @@ function version(entry, provider) {
     ? /^claude-(fable|opus|sonnet|haiku)-(\d+)(?:-(\d{1,2}))?(?:-(\d{8}))?$/.exec(slug)
     : /^gpt-(\d+)(?:\.(\d+))?(?:-([a-z][a-z0-9-]*))?$/.exec(slug);
   if (!match) return null;
+  if (provider === 'openai' && match[3] && !tiers.openai.includes(match[3])) return null;
   return provider === 'anthropic'
     ? { family: match[1], major: Number(match[2]), minor: Number(match[3] || 0), dated: Boolean(match[4]) }
     : { family: match[3] || 'default', major: Number(match[1]), minor: Number(match[2] || 0), dated: false };
@@ -17,6 +18,13 @@ const tier = (family, provider) => {
   const index = tiers[provider].indexOf(family.split('-')[0]);
   return index < 0 ? tiers[provider].length : index;
 };
+
+function legacy(entry, provider) {
+  const slug = entry.slug.replace(`${provider}/`, '');
+  return provider === 'anthropic'
+    ? /^claude-(?:instant-1|2(?:\.1)?|3(?:-\d+)?-(?:opus|sonnet|haiku))(?:-(?:\d{8}|latest))?$/.test(slug)
+    : /^(?:gpt-4o(?:-.*)?|gpt-4(?:\.\d+)?(?:-.*)?|gpt-3\.5-turbo(?:-.*)?|o[134](?:-.*)?)$/.test(slug);
+}
 
 function ordered(models, provider) {
   const parsed = models.map(entry => ({ entry, version: version(entry, provider) }));
@@ -31,7 +39,10 @@ function ordered(models, provider) {
   const featured = [...latest.values()].sort((left, right) => tier(left.version.family, provider) - tier(right.version.family, provider)
     || providerPriority(left.entry, right.entry)).map(item => item.entry);
   const selected = new Set(featured);
-  const remaining = parsed.filter(item => !selected.has(item.entry)).sort((left, right) => {
+  const unclassified = parsed.filter(item => !item.version && !legacy(item.entry, provider))
+    .map(item => item.entry).sort(providerPriority);
+  const unknown = new Set(unclassified);
+  const remaining = parsed.filter(item => !selected.has(item.entry) && !unknown.has(item.entry)).sort((left, right) => {
     if (provider === 'anthropic' && left.version && right.version) {
       return tier(left.version.family, provider) - tier(right.version.family, provider)
         || newest(left.version, right.version) || providerPriority(left.entry, right.entry);
@@ -39,7 +50,7 @@ function ordered(models, provider) {
     if (provider === 'anthropic' && Boolean(left.version) !== Boolean(right.version)) return left.version ? -1 : 1;
     return providerPriority(left.entry, right.entry);
   }).map(item => item.entry);
-  return { featured, remaining };
+  return { featured, unclassified, remaining };
 }
 
 export function mergeCatalogs(claude, openai) {
@@ -52,6 +63,6 @@ export function mergeCatalogs(claude, openai) {
   });
   const anthropic = ordered(qualify(claude.models, 'anthropic'), 'anthropic');
   const native = ordered(qualify(openai.models, 'openai'), 'openai');
-  return { models: [...anthropic.featured, ...native.featured, ...anthropic.remaining, ...native.remaining]
+  return { models: [...anthropic.featured, ...native.featured, ...anthropic.unclassified, ...native.unclassified, ...anthropic.remaining, ...native.remaining]
     .map((entry, priority) => ({ ...entry, priority })) };
 }

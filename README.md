@@ -77,8 +77,11 @@ and restart the bridge to update that list.
 Picker names are the exact provider-prefixed slugs (`anthropic/claude-opus-5-5`,
 `openai/gpt-6-astra`). The order is latest Anthropic families (Fable, Opus,
 Sonnet, Haiku), latest OpenAI families in the newest available GPT generation
-(Astra, Sol, Terra, Luna where present), then older Anthropic models and older
-OpenAI models. Anthropic families use descending versions; older OpenAI models
+(Astra, Sol, Terra, Luna where present), then unrecognized models grouped by
+provider (Anthropic, OpenAI), then known older Anthropic models and older
+OpenAI models. New names in either catalog are retained automatically, with
+unrecognized names in provider priority order ahead of known older models.
+Anthropic families use descending versions; older OpenAI models
 retain their native catalog priority. Latest entries are selected from available
 models, not a fixed list of releases. Hidden models remain hidden. The bridge
 strips `openai/` for upstream requests; existing sessions using unprefixed OpenAI
