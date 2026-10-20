@@ -8,6 +8,31 @@ const model = { provider: 'anthropic', id: 'claude-test', api: 'anthropic-messag
 const codec = createCodec(randomBytes(32));
 const serialize = value => JSON.parse(JSON.stringify(value));
 
+test('Claude groups late parallel results with their calls across user steering and later assistant turns', () => {
+  const call = id => ({ type: 'function_call', call_id: id, name: 'write_stdin', arguments: '{}' });
+  const result = id => ({ type: 'function_call_output', call_id: id, output: `result ${id}` });
+  const input = [call('a'), call('b'), { role: 'user', content: 'New instruction' },
+    result('b'), { role: 'developer', content: 'Keep constraints' },
+    { role: 'assistant', content: 'Update' }, call('c'), result('c'), result('a'),
+    { role: 'user', content: 'Continue' }];
+  const canonical = fromResponses(input);
+  const before = serialize(canonical);
+  const projected = toAnthropic(canonical, model, { codec });
+  assert.deepEqual(projected.map(message => message.role === 'toolResult' ? message.toolCallId : message.role),
+    ['assistant', 'b', 'a', 'user', 'system', 'assistant', 'c', 'user']);
+  assert.deepEqual(projected[1].content, [{ type: 'text', text: 'result b' }]);
+  assert.deepEqual(projected[2].content, [{ type: 'text', text: 'result a' }]);
+  assert.deepEqual(canonical, before);
+  assert.deepEqual(restoreSource(canonical), input);
+});
+
+test('Claude rejects ambiguous repeated tool IDs and duplicate results before inference', () => {
+  const call = { type: 'function_call', call_id: 'a', name: 'write_stdin', arguments: '{}' };
+  const result = { type: 'function_call_output', call_id: 'a', output: 'done' };
+  assert.throws(() => toAnthropic(fromResponses([call, call]), model), /Duplicate tool call ID/);
+  assert.throws(() => toAnthropic(fromResponses([call, result, result]), model), /Duplicate tool result/);
+});
+
 test('Responses import is lossless after canonical serialization, including native fields and unknown artifacts', () => {
   const source = [
     { type: 'message', id: 'msg_1', role: 'assistant', content: [{ type: 'output_text', text: 'Answer', annotations: [{ type: 'citation', url: 'https://example.com' }] }], status: 'completed', phase: 'final_answer' },

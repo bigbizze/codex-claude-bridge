@@ -166,6 +166,9 @@ export function toAnthropic(canonical, model, { codec, toolName = name => name }
   assertRequest(canonical);
   const messages = [];
   const toolNames = new Map();
+  const toolOwners = new Map();
+  const resultsByOwner = new Map();
+  const answeredCalls = new Set();
   const assistant = () => {
     if (messages.at(-1)?.role !== 'assistant') messages.push({ role: 'assistant', content: [], api: model.api, provider: model.provider, model: model.id, usage: emptyUsage(), stopReason: 'stop', timestamp: Date.now() });
     return messages.at(-1);
@@ -196,13 +199,21 @@ export function toAnthropic(canonical, model, { codec, toolName = name => name }
       catch { throw new Error(`Invalid arguments for ${entry.name}`); }
       if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Tool arguments must be a JSON object.');
       const name = toolName(entry.name, entry.namespace);
+      if (toolOwners.has(entry.callId)) throw new Error(`Duplicate tool call ID: ${entry.callId}`);
       toolNames.set(entry.callId, name);
+      toolOwners.set(entry.callId, assistant());
       assistant().content.push({ type: 'toolCall', id: entry.callId, name, arguments: args });
       assistant().stopReason = 'toolUse';
     } else if (entry.kind === 'tool_result') {
       const name = toolNames.get(entry.callId);
       if (!name) throw new Error(`No preceding tool call for ${entry.callId}`);
-      messages.push({ role: 'toolResult', toolCallId: entry.callId, toolName: name, content: piContent(entry.content), isError: entry.isError, timestamp: Date.now() });
+      if (answeredCalls.has(entry.callId)) throw new Error(`Duplicate tool result for ${entry.callId}`);
+      answeredCalls.add(entry.callId);
+      const result = { role: 'toolResult', toolCallId: entry.callId, toolName: name, content: piContent(entry.content), isError: entry.isError, timestamp: Date.now() };
+      const owner = toolOwners.get(entry.callId);
+      if (!resultsByOwner.has(owner)) resultsByOwner.set(owner, []);
+      resultsByOwner.get(owner).push(result);
+      messages.push(result);
     } else if (entry.kind === 'message') {
       const body = piContent(entry.content);
       if (entry.role === 'assistant') {
@@ -215,7 +226,12 @@ export function toAnthropic(canonical, model, { codec, toolName = name => name }
       else throw new Error(`Unsupported message role: ${entry.role}`);
     } else throw new Error(`Unsupported input item: ${entry.artifactType || entry.kind}`);
   }
-  return messages;
+  // Codex can save user steering or later assistant messages before an in-flight
+  // tool returns. Claude requires results directly after the calling assistant.
+  // Group results only in this projection, preserving their arrival order and
+  // all other messages. Otherwise Pi inserts a synthetic result before the user
+  // message and sends the real result later as an unmatched duplicate.
+  return messages.flatMap(message => message.role === 'toolResult' ? [] : [message, ...(resultsByOwner.get(message) || [])]);
 }
 
 export function fromTranscript(format, text, options = {}) {

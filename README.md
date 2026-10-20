@@ -222,6 +222,10 @@ node launch.mjs --check
 ```
 
 Restart `codex-claude` after the update. Your existing alias still works.
+For Claude requests, results from in-flight tools are grouped directly after
+their calling assistant message, even when user steering arrives first. Saved
+history retains its original order. Duplicate call IDs or results are rejected
+locally before inference.
 Assistant text before a tool call is marked as commentary so Codex can show its
 working indicator while the tool input is generated. Final responses are marked
 as final answers.
