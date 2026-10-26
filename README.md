@@ -226,6 +226,26 @@ For Claude requests, results from in-flight tools are grouped directly after
 their calling assistant message, even when user steering arrives first. Saved
 history retains its original order. Duplicate call IDs or results are rejected
 locally before inference.
+
+If a saved conversation repeatedly fails with `unexpected tool_use_id` after a
+pause or interruption, update the bridge, exit the old client/bridge process,
+and run `codex-claude resume <session-id>`. Updating files alone does not reload
+the code in a running bridge. The pairing fix repairs the outgoing request on
+each replay; do not delete tool records, roll back turns, or replace the session.
+Before recovery, keep a private backup of the full session JSONL, its parent
+rollouts (if its session metadata contains `history_base` or `forked_from_id`),
+and the existing `reasoning.key` described above. Follow parent references
+recursively: paginated forks may require their source rollouts to reload.
+Never regenerate the key to repair this error.
+
+To check interruption replay through the installed Pi's actual Anthropic
+serializer without credentials or network requests:
+
+```bash
+PI_ANTHROPIC_MODULE=/absolute/path/to/pi-ai/dist/api/anthropic-messages.js \
+  node --test pi-history.integration.test.mjs
+```
+
 Assistant text before a tool call is marked as commentary so Codex can show its
 working indicator while the tool input is generated. Final responses are marked
 as final answers.
