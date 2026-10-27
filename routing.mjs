@@ -5,7 +5,7 @@ export function openaiRequest(request) {
   return { ...request, model: request.model?.replace(/^openai\//, ''), input: toOpenAI(fromResponses(request.input ?? [])) };
 }
 
-export async function forwardOpenAI({ request, headers, response, signal, onActivity, fetchImpl = fetch, baseUrl }) {
+export async function forwardOpenAI({ request, headers, response, signal, onActivity, onRateLimit, fetchImpl = fetch, baseUrl }) {
   const forwarded = new Headers({ 'content-type': 'application/json', accept: 'text/event-stream' });
   for (const name of ['authorization', 'chatgpt-account-id', 'openai-organization', 'openai-project', 'openai-beta', 'originator', 'version', 'session_id', 'conversation_id', 'x-codex-turn-metadata']) {
     if (typeof headers[name] === 'string') forwarded.set(name, headers[name]);
@@ -16,6 +16,10 @@ export async function forwardOpenAI({ request, headers, response, signal, onActi
     method: 'POST', headers: forwarded, body: JSON.stringify(openaiRequest(request)), signal, redirect: 'error',
   });
   onActivity();
+  if (result.status === 429 && onRateLimit && await onRateLimit()) {
+    await result.body?.cancel();
+    return false;
+  }
   const responseHeaders = {};
   for (const [name, value] of result.headers) {
     if (['content-type', 'cache-control', 'retry-after', 'www-authenticate', 'x-request-id'].includes(name) || name.startsWith('x-codex-') || name.startsWith('x-ratelimit-')) responseHeaders[name] = value;
