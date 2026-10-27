@@ -4,6 +4,33 @@ import { randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { createCodec, translate } from './bridge.mjs';
 
+test('Pi serializes compacted inline tool declarations into Anthropic tools without history artifacts', {
+  skip: !process.env.PI_ANTHROPIC_MODULE,
+}, async () => {
+  const { stream } = await import(pathToFileURL(process.env.PI_ANTHROPIC_MODULE).href);
+  const { normalizeContext } = await import(new URL('../utils/transcript.js', pathToFileURL(process.env.PI_ANTHROPIC_MODULE)).href);
+  const model = { id: 'claude-test', provider: 'anthropic', api: 'anthropic-messages',
+    baseUrl: 'https://api.anthropic.com', input: ['text'], maxTokens: 4096,
+    contextWindow: 200000, reasoning: false, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+  const { context } = translate({ input: [{ type: 'additional_tools', role: 'developer', tools: [
+    { type: 'namespace', name: 'functions', tools: [{ type: 'custom', name: 'exec' },
+      { type: 'function', name: 'lookup', parameters: { type: 'object', properties: { query: { type: 'string' } } } }] },
+  ] }, { role: 'user', content: 'Continue' }] }, model);
+  let payload;
+  let transported = false;
+  const result = await stream(model, normalizeContext(context), {
+    client: { messages: { create() { transported = true; throw new Error('Unexpected transport'); } } },
+    onPayload(value) { payload = value; throw new Error('Offline inline-tool capture'); },
+  }).result();
+  assert.equal(transported, false);
+  assert.match(result.errorMessage, /Offline inline-tool capture/);
+  assert.equal(payload.tools.length, 2);
+  assert.deepEqual(payload.tools.map(tool => tool.name), context.tools.map(tool => tool.name));
+  assert.deepEqual(payload.tools[0].input_schema.required, ['input']);
+  assert.deepEqual(payload.tools[1].input_schema.properties.query, { type: 'string' });
+  assert.doesNotMatch(JSON.stringify(payload.messages), /additional_tools/);
+});
+
 // Point this at an installed Pi's pi-ai/dist/api/anthropic-messages.js.
 // Capture the actual provider payload before transport; no credentials or network.
 test('Pi replays an interrupted goal with exactly one result before the pause message', {

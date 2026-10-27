@@ -77,8 +77,18 @@ export function translate(request, model, codec) {
   if (request.background) throw new RequestError('Background Responses jobs are not supported.');
   const custom = new Set();
   const toolMap = new Map();
-  const flatTools = (request.tools || []).flatMap(tool => tool.type === 'namespace'
+  let canonical;
+  try { canonical = fromResponses(request.input ?? []); }
+  catch (error) { throw new RequestError(error.message); }
+  const flattenTools = definitions => definitions.flatMap(tool => tool.type === 'namespace'
     ? tool.tools.map(inner => ({ ...inner, namespace: tool.name })) : [tool]);
+  const historicalTools = new Map();
+  if (request.tools === undefined) {
+    for (const entry of canonical.entries) if (entry.kind === 'tool_definitions') {
+      for (const tool of flattenTools(entry.tools)) historicalTools.set(wireName(tool.name, tool.namespace), tool);
+    }
+  }
+  const flatTools = request.tools === undefined ? [...historicalTools.values()] : flattenTools(request.tools);
   const hasPlanner = flatTools.some(tool => {
     const plan = tool.parameters?.properties?.plan;
     return tool.type === 'function' && tool.name === 'update_plan' && (!tool.namespace || tool.namespace === 'functions') &&
@@ -98,7 +108,7 @@ export function translate(request, model, codec) {
   });
   if (request.tool_choice && !['auto', 'none'].includes(request.tool_choice)) throw new RequestError('Only auto and none tool choices are supported.');
   let messages;
-  try { messages = toAnthropic(fromResponses(request.input ?? []), model, { codec, toolName: wireName }); }
+  try { messages = toAnthropic(canonical, model, { codec, toolName: wireName }); }
   catch (error) { throw new RequestError(error.message); }
   const effort = request.reasoning?.effort ?? 'medium';
   if (!['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(effort)) throw new RequestError(`Unsupported reasoning effort: ${effort}`);

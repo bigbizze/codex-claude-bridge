@@ -8,6 +8,21 @@ const model = { provider: 'anthropic', id: 'claude-test', api: 'anthropic-messag
 const codec = createCodec(randomBytes(32));
 const serialize = value => JSON.parse(JSON.stringify(value));
 
+test('inline tool declarations survive canonical and OpenAI replay without becoming Claude messages', () => {
+  const input = [{ type: 'additional_tools', id: 'at_saved', role: 'developer', extra: true,
+    tools: [{ type: 'function', name: 'lookup', parameters: { type: 'object' } }] },
+  { role: 'user', content: 'Continue' }];
+  const canonical = serialize(fromResponses(input));
+  assert.equal(canonical.entries[0].kind, 'tool_definitions');
+  assert.deepEqual(toOpenAI(canonical)[0], input[0]);
+  assert.deepEqual(toAnthropic(canonical, model).map(message => message.content), [[{ type: 'text', text: 'Continue' }]]);
+  canonical.entries[0].tools[0].name = 'updated';
+  assert.equal(toOpenAI(canonical)[0].tools[0].name, 'updated');
+  assert.deepEqual(restoreSource(canonical), input);
+  assert.throws(() => fromResponses([{ type: 'additional_tools' }]), /Additional tools must be an array/);
+  assert.throws(() => toAnthropic(fromResponses([{ type: 'unknown_artifact' }]), model), /Unsupported input item/);
+});
+
 test('Claude groups late parallel results with their calls across user steering and later assistant turns', () => {
   const call = id => ({ type: 'function_call', call_id: id, name: 'write_stdin', arguments: '{}' });
   const result = id => ({ type: 'function_call_output', call_id: id, output: `result ${id}` });
