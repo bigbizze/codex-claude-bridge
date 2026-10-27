@@ -43,6 +43,7 @@ not guaranteed to survive edits, reordering, or compaction.
 | `reasoning` | `summaries` and a provider-specific `state` with provider, model when known, encoding, and value. |
 | `tool_call` | `callId`, tool name, namespace, arguments encoded as JSON or raw text. |
 | `tool_result` | Matching `callId`, tool kind, content, and `isError`. |
+| `tool_definitions` | Role and tool declarations from Responses `additional_tools` items. |
 | `artifact` | Provider-owned items such as compaction records and unknown future item types. |
 
 Provider-specific state includes OpenAI encrypted reasoning, Claude signed and
@@ -83,6 +84,16 @@ Anthropic remain explicitly marked as failures in the OpenAI result text.
 and projects OpenAI reasoning summaries as text. Opaque OpenAI state remains in
 canonical storage and is not sent to Anthropic. The bridge key is required to
 decode `pi1` state. A missing key or invalid signature fails explicitly.
+
+Codex can retain `additional_tools` in compacted history after using Responses
+Lite. OpenAI projection preserves these items. Anthropic message projection
+omits the declarations from messages; the bridge uses them as tools only when
+the request has no top-level `tools` field. Later inline declarations replace
+earlier declarations with the same namespace and name. An explicit top-level
+tool list, including an empty list, is authoritative, so historical tools do not
+restore capabilities that Codex has removed. Custom tools and namespace mapping
+use the same conversion as top-level tools. Restart the bridge and resume the
+existing session to load this support; no transcript edits are needed.
 
 Lossless storage does not imply that every provider accepts every item type.
 For example, a document attachment can be retained canonically while a destination

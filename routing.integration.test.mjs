@@ -83,6 +83,9 @@ test(`real Codex lists both providers and switches the same persisted thread wit
   assert.ok(models.data.some(entry => entry.model === `openai/${openaiModel.slug}`));
   const source = (await client.call('thread/start', { cwd: dir })).thread;
   await client.call('thread/inject_items', { threadId: source.id, items: [
+    { type: 'additional_tools', id: 'at_compacted', role: 'developer', tools: [
+      { type: 'function', name: 'historical_only', parameters: { type: 'object' } },
+    ] },
     { type: 'custom_tool_call', id: 'fc_legacy_bridge_patch', call_id: 'legacy_patch', name: 'apply_patch', namespace: 'functions', input: 'Historical patch, already applied' },
     { type: 'custom_tool_call_output', call_id: 'legacy_patch', output: 'Historical patch completed' },
   ] });
@@ -121,6 +124,8 @@ test(`real Codex lists both providers and switches the same persisted thread wit
   assert.doesNotMatch(JSON.stringify(claudeRequests[1]), /openai-opaque/);
   await client.close();
   const saved = await readFile(source.path, 'utf8');
+  assert.match(saved, /at_compacted/);
+  for (const context of claudeRequests) assert.ok(context.tools.every(tool => !tool.name.includes('historical_only')));
   assert.match(saved, /pi1\./);
   assert.match(saved, /openai-opaque-1/);
   assert.match(saved, /openai-opaque-2/);

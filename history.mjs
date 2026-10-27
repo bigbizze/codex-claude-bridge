@@ -44,6 +44,9 @@ export function fromResponses(input, { codec } = {}) {
     let entry;
     if (item.type === 'message' || (!item.type && item.role)) {
       entry = { kind: 'message', role: item.role, content: content(item.content, 'responses') };
+    } else if (item.type === 'additional_tools') {
+      if (!Array.isArray(item.tools)) throw new Error('Additional tools must be an array.');
+      entry = { kind: 'tool_definitions', role: item.role, tools: clone(item.tools) };
     } else if (item.type === 'reasoning') {
       const bridge = item.encrypted_content?.startsWith('pi1.');
       const decoded = bridge && codec ? codec.open(item.encrypted_content) : null;
@@ -121,6 +124,8 @@ export function toOpenAI(canonical) {
   assertRequest(canonical);
   return canonical.entries.flatMap(entry => {
     const native = canonical.source.format === 'responses' ? original(canonical, entry) : null;
+    if (entry.kind === 'tool_definitions') return [{ ...extensions(native, ['type', 'role', 'tools']),
+      type: 'additional_tools', role: entry.role, tools: clone(entry.tools) }];
     if (entry.kind === 'reasoning') {
       if (entry.state.provider === 'openai') {
         if (entry.state.encoding !== 'openai-responses') throw new Error('OpenAI reasoning has an incompatible state encoding.');
@@ -174,6 +179,7 @@ export function toAnthropic(canonical, model, { codec, toolName = name => name }
     return messages.at(-1);
   };
   for (const entry of canonical.entries) {
+    if (entry.kind === 'tool_definitions') continue;
     if (entry.kind === 'reasoning') {
       const state = entry.state;
       if (state.provider === 'anthropic') {

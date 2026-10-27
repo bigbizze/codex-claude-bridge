@@ -20,6 +20,58 @@ async function start(t, streamSimple, timeout) {
 }
 function events(text) { return text.split('\n').filter(line => line.startsWith('data: ')).map(line => JSON.parse(line.slice(6))); }
 
+test('compacted inline tools replay through HTTP with namespaced custom tool output', async t => {
+  const declaration = { type: 'additional_tools', id: 'at_compacted', role: 'developer', tools: [
+    { type: 'namespace', name: 'functions', tools: [{ type: 'custom', name: 'exec', description: 'Run code' }] },
+  ] };
+  const input = [declaration, { role: 'user', content: 'Continue' }];
+  const before = structuredClone(input);
+  const { request } = await start(t, async function* (_model, context) {
+    assert.equal(context.tools.length, 1);
+    assert.equal(context.tools[0].description, 'Run code');
+    assert.deepEqual(context.tools[0].parameters.required, ['input']);
+    assert.deepEqual(context.messages.map(message => message.role), ['user']);
+    const message = assistant([{ type: 'toolCall', id: 'toolu_inline', name: context.tools[0].name,
+      arguments: { input: 'text(42)' } }]);
+    message.stopReason = 'toolUse';
+    yield { type: 'done', reason: 'toolUse', message };
+  });
+  const response = await request({ input, stream: true });
+  assert.equal(response.status, 200);
+  const completed = events(await response.text()).at(-1);
+  assert.equal(completed.type, 'response.completed');
+  const call = completed.response.output.find(item => item.type === 'custom_tool_call');
+  assert.equal(call.namespace, 'functions');
+  assert.equal(call.name, 'exec');
+  assert.equal(call.input, 'text(42)');
+  assert.deepEqual(input, before);
+});
+
+test('current tools override historical tools including an explicitly empty list', () => {
+  const input = [{ type: 'additional_tools', role: 'developer', tools: [
+    { type: 'function', name: 'stale', parameters: { type: 'object' } },
+    { type: 'function', name: 'current', description: 'old schema', parameters: { type: 'object' } },
+  ] }, { role: 'user', content: 'Continue' }];
+  const result = translate({ input, tools: [{ type: 'function', name: 'current', description: 'current schema',
+    parameters: { type: 'object', required: ['query'], properties: { query: { type: 'string' } } } }] }, model, codec);
+  assert.equal(result.context.tools.length, 1);
+  assert.equal(result.context.tools[0].description, 'current schema');
+  assert.deepEqual(result.context.tools[0].parameters.required, ['query']);
+  assert.doesNotMatch(result.context.systemPrompt, /stale/);
+  assert.deepEqual(translate({ input, tools: [] }, model, codec).context.tools, []);
+});
+
+test('later inline declarations update tools by namespace and name', () => {
+  const declaration = (namespace, description) => ({ type: 'additional_tools', role: 'developer', tools: [
+    { type: 'namespace', name: namespace, tools: [{ type: 'function', name: 'lookup', description, parameters: { type: 'object' } }] },
+  ] });
+  const result = translate({ input: [declaration('first', 'old'), declaration('second', 'separate'),
+    declaration('first', 'new'), { role: 'user', content: 'Continue' }] }, model, codec);
+  assert.deepEqual(result.context.tools.map(tool => tool.description), ['new', 'separate']);
+  assert.equal(result.toolMap.size, 2);
+  assert.throws(() => translate({ input: [{ type: 'additional_tools', tools: null }] }, model, codec), /Additional tools must be an array/);
+});
+
 // Exercise the HTTP handler without opening a socket; fake time controls the
 // provider inactivity deadline independently of the client heartbeat.
 function inMemoryRequest(t, streamSimple, requestTimeoutMs) {
