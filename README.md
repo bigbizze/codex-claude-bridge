@@ -94,6 +94,22 @@ updated launcher, then use `/model`:
 codex-claude resume <session-id>
 ```
 
+When Codex switches to a smaller context window, it may first ask the previous
+model to compact the conversation. If that request is rate limited (429), the
+bridge retries compaction once with the model selected for the current turn.
+This also covers automatic pre-turn compaction for a model compatibility change.
+The retry uses the destination's normal credentials and history adapter. A
+destination error, including a context-size error, is returned to Codex.
+
+The fallback requires Codex's compaction metadata and persisted
+`thread_settings_applied`/`task_started` records (tested with Codex 0.164.0).
+The bridge reads those records under `CODEX_HOME` without changing them and
+matches the exact thread and turn. It does not guess from the launch model,
+reroute ordinary requests, or retry after output has begun. If the selection
+cannot be verified, the original error is preserved. Restart an existing bridge
+to load this fix, resume the conversation, and select the destination with
+`/model` before retrying your prompt.
+
 The saved session retains both providers' original reasoning items. Both routes
 import the active history into a provider-neutral canonical format, then use
 separate destination adapters. Each outgoing request omits the other provider's encrypted reasoning and keeps readable

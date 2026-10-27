@@ -4,6 +4,7 @@ import { randomUUID, randomBytes, createCipheriv, createDecipheriv, timingSafeEq
 import { forwardOpenAI } from './routing.mjs';
 import { mergeCatalogs } from './model-catalog.mjs';
 import { fromResponses, toAnthropic } from './history.mjs';
+import { previousModelCompaction, createSelectedModelReader } from './compaction.mjs';
 
 export class RequestError extends Error {
   constructor(message, status = 400) { super(message); this.status = status; }
@@ -147,7 +148,7 @@ function outputItem(block, id, custom, toolMap, codec, model, final, showReasoni
 
 function json(res, status, body) { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); }
 
-export function createBridge({ registry, token, codec, requestTimeoutMs = 600000, openai }) {
+export function createBridge({ registry, token, codec, requestTimeoutMs = 600000, openai, selectedModel = createSelectedModelReader() }) {
   const expected = Buffer.from(token);
   const controllers = new Set();
   const server = http.createServer(async (req, res) => {
@@ -182,118 +183,150 @@ export function createBridge({ registry, token, codec, requestTimeoutMs = 600000
       }
       let request;
       try { request = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new RequestError('Invalid JSON.'); }
-      if (openai?.catalog.models.some(entry => entry.slug === request.model?.replace(/^openai\//, ''))) {
-        if (!req.headers['x-codex-bridge-token'] || req.headers.authorization === `Bearer ${token}`) throw new RequestError('OpenAI requests require Codex authentication and the bridge token.', 401);
-        await forwardOpenAI({ request, headers: req.headers, response: res, signal: controller.signal, onActivity: resetIdleTimeout, ...openai });
+      const compaction = previousModelCompaction(request, req.headers);
+      let retried = false;
+      const fallback = async () => {
+        if (!compaction || retried || controller.signal.aborted || res.headersSent || res.destroyed) return false;
+        let selected;
+        try { selected = await selectedModel(compaction); } catch { return false; }
+        if (controller.signal.aborted || !selected || selected.model.replace(/^openai\//, '') === request.model?.replace(/^openai\//, '')) return false;
+        const isOpenAI = openai?.catalog.models.some(entry => entry.slug === selected.model.replace(/^openai\//, ''));
+        if (!isOpenAI && !models().some(model => `${model.provider}/${model.id}` === selected.model)) return false;
+        if (isOpenAI && (!req.headers['x-codex-bridge-token'] || !req.headers.authorization || req.headers.authorization === `Bearer ${token}`)) return false;
+        console.error(`[pi-codex] previous-model compaction rate limited; retrying with selected model ${selected.model}`);
+        request = { ...request, model: selected.model, reasoning: { ...request.reasoning, effort: selected.reasoningEffort ?? undefined } };
+        retried = true;
+        resetIdleTimeout();
+        return true;
+      };
+      for (;;) {
+        if (openai?.catalog.models.some(entry => entry.slug === request.model?.replace(/^openai\//, ''))) {
+          if (!req.headers['x-codex-bridge-token'] || req.headers.authorization === `Bearer ${token}`) throw new RequestError('OpenAI requests require Codex authentication and the bridge token.', 401);
+          const forwarded = await forwardOpenAI({ request, headers: req.headers, response: res, signal: controller.signal, onActivity: resetIdleTimeout, onRateLimit: fallback, ...openai });
+          if (forwarded === false) continue;
+          return;
+        }
+        const model = models().find(model => `${model.provider}/${model.id}` === request.model);
+        if (!model) throw new RequestError('Model is unavailable. Check Pi login and the selected model.', 404);
+        const { context, custom, toolMap, options } = translate(request, model, codec);
+        if (process.env.CODEX_PI_DEBUG) console.error(`[pi-codex] effort=${options.reasoning || 'none'} requested=${request.reasoning?.effort || 'absent'}`);
+        const showReasoning = request.reasoning?.summary !== 'none';
+        const response = { id: responseId, object: 'response', created_at: Math.floor(Date.now() / 1000), model: request.model, status: 'in_progress', output: [], usage: null };
+        const emit = (type, fields) => {
+          if (!request.stream || res.destroyed) return;
+          if (res.writableLength > 4 * 1024 * 1024) throw new Error('Client is not reading the event stream.');
+          res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: sequence++, ...fields })}\n\n`);
+        };
+        const startStream = () => {
+          if (!request.stream || res.headersSent) return;
+          res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+          emit('response.created', { response });
+          heartbeat = setInterval(() => {
+            try { emit('response.in_progress', { response: { ...response, output: [] } }); }
+            catch (error) { controller.abort(error); }
+          }, 15000);
+        };
+        // Keep the response uncommitted until the compactor produces content so a
+        // pre-stream 429 can be replaced by exactly one destination-model response.
+        if (!compaction) startStream();
+        const blocks = new Map();
+        const start = (index, block) => {
+          if (blocks.has(index)) return blocks.get(index);
+          const prefix = block.type === 'thinking' ? 'rs' : block.type === 'text' ? 'msg' : custom.has(block.name) ? 'ctc' : 'fc';
+          const state = { id: `${prefix}_${randomUUID()}`, output_index: blocks.size, ended: false, customInput: '' };
+          blocks.set(index, state);
+          emit('response.output_item.added', { output_index: state.output_index, item: outputItem(block, state.id, custom, toolMap, codec, request.model, false, showReasoning) });
+          if (block.type === 'text') emit('response.content_part.added', { item_id: state.id, output_index: state.output_index, content_index: 0, part: { type: 'output_text', text: '', annotations: [] } });
+          if (block.type === 'thinking' && showReasoning) emit('response.reasoning_summary_part.added', { item_id: state.id, output_index: state.output_index, summary_index: 0, part: { type: 'summary_text', text: '' } });
+          return state;
+        };
+        const customDelta = (state, input) => {
+          if (typeof input !== 'string') return;
+          // A partial JSON parser can expose a trailing, incomplete UTF-16 pair.
+          if (/[\uD800-\uDBFF]$/.test(input)) input = input.slice(0, -1);
+          if (!input.startsWith(state.customInput)) throw new Error('Provider changed an already streamed tool input.');
+          const delta = input.slice(state.customInput.length);
+          if (delta) emit('response.custom_tool_call_input.delta', { item_id: state.id, output_index: state.output_index, delta });
+          state.customInput = input;
+        };
+        const finish = (index, block, phase = 'commentary') => {
+          const state = start(index, block);
+          if (state.ended) return;
+          state.ended = true;
+          const item = outputItem(block, state.id, custom, toolMap, codec, request.model, true, showReasoning, phase);
+          const fields = { item_id: state.id, output_index: state.output_index };
+          if (block.type === 'text') {
+            emit('response.output_text.done', { ...fields, content_index: 0, text: block.text });
+            emit('response.content_part.done', { ...fields, content_index: 0, part: item.content[0] });
+          } else if (block.type === 'thinking') {
+            if (showReasoning) {
+              emit('response.reasoning_summary_text.done', { ...fields, summary_index: 0, text: block.thinking || '' });
+              emit('response.reasoning_summary_part.done', { ...fields, summary_index: 0, part: { type: 'summary_text', text: block.thinking || '' } });
+            }
+          } else if (custom.has(block.name)) {
+            customDelta(state, item.input);
+            emit('response.custom_tool_call_input.done', { ...fields, input: item.input });
+          } else emit('response.function_call_arguments.done', { ...fields, arguments: item.arguments });
+          response.output[state.output_index] = item;
+          emit('response.output_item.done', { output_index: state.output_index, item });
+        };
+        let complete = false;
+        let pendingText;
+        const finishPendingText = (phase = 'commentary') => {
+          if (!pendingText) return;
+          finish(pendingText.index, pendingText.block, phase);
+          pendingText = undefined;
+        };
+        // Pi defaults to no retries. Use its provider retry policy, which honors
+        // Retry-After and cancellation and only retries before response streaming.
+        try {
+          for await (const event of registry.streamSimple(model, context, { ...options, maxRetries: 2, signal: controller.signal })) {
+            if (controller.signal.aborted) throw controller.signal.reason;
+            resetIdleTimeout();
+            if (event.type === 'error') {
+              finishPendingText();
+              throw new Error(event.error.errorMessage || 'Provider request failed.');
+            }
+            if (event.type === 'done') {
+              startStream();
+              if (process.env.CODEX_PI_DEBUG) console.error(`[pi-codex] done reason=${event.reason} output_tokens=${event.message.usage.output}`);
+              const content = event.message.content;
+              const phaseAt = index => event.reason === 'stop' && index === content.length - 1 ? 'final_answer' : 'commentary';
+              if (pendingText) finishPendingText(phaseAt(pendingText.index));
+              content.forEach((block, index) => finish(index, block, phaseAt(index)));
+              response.usage = usage(event.message.usage);
+              response.status = event.reason === 'length' ? 'incomplete' : 'completed';
+              if (event.reason === 'length') response.incomplete_details = { reason: 'max_output_tokens' };
+              emit(event.reason === 'length' ? 'response.incomplete' : 'response.completed', { response });
+              complete = true;
+              break;
+            }
+            if (event.contentIndex === undefined) continue;
+            // Claude supplies no message phase. The next block or stop reason tells
+            // us whether this text was commentary or the final answer. Complete it
+            // before announcing the next tool so Codex restores its working status.
+            if (pendingText && event.contentIndex !== pendingText.index) finishPendingText();
+            const block = event.partial.content[event.contentIndex];
+            if (!block) throw new Error('Provider event has no content block.');
+            startStream();
+            const state = start(event.contentIndex, block);
+            const fields = { item_id: state.id, output_index: state.output_index };
+            if (event.type === 'text_delta') emit('response.output_text.delta', { ...fields, content_index: 0, delta: event.delta });
+            if (event.type === 'thinking_delta' && showReasoning) emit('response.reasoning_summary_text.delta', { ...fields, summary_index: 0, delta: event.delta });
+            if (event.type === 'toolcall_delta' && !custom.has(block.name)) emit('response.function_call_arguments.delta', { ...fields, delta: event.delta });
+            if (event.type === 'toolcall_delta' && custom.has(block.name)) customDelta(state, block.arguments?.input);
+            if (event.type === 'text_end') pendingText = { index: event.contentIndex, block: { ...block } };
+            else if (event.type.endsWith('_end')) finish(event.contentIndex, block);
+          }
+          if (!complete) throw new Error('Provider stream ended without a completion event.');
+        } catch (error) {
+          if (!blocks.size && /\b429\b|rate_limit_error|rate.limit.exceeded/i.test(error.message) && await fallback()) continue;
+          startStream();
+          throw error;
+        }
+        if (request.stream) res.end(); else json(res, 200, response);
         return;
       }
-      const model = models().find(model => `${model.provider}/${model.id}` === request.model);
-      if (!model) throw new RequestError('Model is unavailable. Check Pi login and the selected model.', 404);
-      const { context, custom, toolMap, options } = translate(request, model, codec);
-      if (process.env.CODEX_PI_DEBUG) console.error(`[pi-codex] effort=${options.reasoning || 'none'} requested=${request.reasoning?.effort || 'absent'}`);
-      const showReasoning = request.reasoning?.summary !== 'none';
-      const response = { id: responseId, object: 'response', created_at: Math.floor(Date.now() / 1000), model: request.model, status: 'in_progress', output: [], usage: null };
-      const emit = (type, fields) => {
-        if (!request.stream || res.destroyed) return;
-        if (res.writableLength > 4 * 1024 * 1024) throw new Error('Client is not reading the event stream.');
-        res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: sequence++, ...fields })}\n\n`);
-      };
-      if (request.stream) {
-        res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
-        emit('response.created', { response });
-        heartbeat = setInterval(() => {
-          try { emit('response.in_progress', { response: { ...response, output: [] } }); }
-          catch (error) { controller.abort(error); }
-        }, 15000);
-      }
-      const blocks = new Map();
-      const start = (index, block) => {
-        if (blocks.has(index)) return blocks.get(index);
-        const prefix = block.type === 'thinking' ? 'rs' : block.type === 'text' ? 'msg' : custom.has(block.name) ? 'ctc' : 'fc';
-        const state = { id: `${prefix}_${randomUUID()}`, output_index: blocks.size, ended: false, customInput: '' };
-        blocks.set(index, state);
-        emit('response.output_item.added', { output_index: state.output_index, item: outputItem(block, state.id, custom, toolMap, codec, request.model, false, showReasoning) });
-        if (block.type === 'text') emit('response.content_part.added', { item_id: state.id, output_index: state.output_index, content_index: 0, part: { type: 'output_text', text: '', annotations: [] } });
-        if (block.type === 'thinking' && showReasoning) emit('response.reasoning_summary_part.added', { item_id: state.id, output_index: state.output_index, summary_index: 0, part: { type: 'summary_text', text: '' } });
-        return state;
-      };
-      const customDelta = (state, input) => {
-        if (typeof input !== 'string') return;
-        // A partial JSON parser can expose a trailing, incomplete UTF-16 pair.
-        if (/[\uD800-\uDBFF]$/.test(input)) input = input.slice(0, -1);
-        if (!input.startsWith(state.customInput)) throw new Error('Provider changed an already streamed tool input.');
-        const delta = input.slice(state.customInput.length);
-        if (delta) emit('response.custom_tool_call_input.delta', { item_id: state.id, output_index: state.output_index, delta });
-        state.customInput = input;
-      };
-      const finish = (index, block, phase = 'commentary') => {
-        const state = start(index, block);
-        if (state.ended) return;
-        state.ended = true;
-        const item = outputItem(block, state.id, custom, toolMap, codec, request.model, true, showReasoning, phase);
-        const fields = { item_id: state.id, output_index: state.output_index };
-        if (block.type === 'text') {
-          emit('response.output_text.done', { ...fields, content_index: 0, text: block.text });
-          emit('response.content_part.done', { ...fields, content_index: 0, part: item.content[0] });
-        } else if (block.type === 'thinking') {
-          if (showReasoning) {
-            emit('response.reasoning_summary_text.done', { ...fields, summary_index: 0, text: block.thinking || '' });
-            emit('response.reasoning_summary_part.done', { ...fields, summary_index: 0, part: { type: 'summary_text', text: block.thinking || '' } });
-          }
-        } else if (custom.has(block.name)) {
-          customDelta(state, item.input);
-          emit('response.custom_tool_call_input.done', { ...fields, input: item.input });
-        } else emit('response.function_call_arguments.done', { ...fields, arguments: item.arguments });
-        response.output[state.output_index] = item;
-        emit('response.output_item.done', { output_index: state.output_index, item });
-      };
-      let complete = false;
-      let pendingText;
-      const finishPendingText = (phase = 'commentary') => {
-        if (!pendingText) return;
-        finish(pendingText.index, pendingText.block, phase);
-        pendingText = undefined;
-      };
-      // Pi defaults to no retries. Use its provider retry policy, which honors
-      // Retry-After and cancellation and only retries before response streaming.
-      for await (const event of registry.streamSimple(model, context, { ...options, maxRetries: 2, signal: controller.signal })) {
-        if (controller.signal.aborted) throw controller.signal.reason;
-        resetIdleTimeout();
-        if (event.type === 'error') {
-          finishPendingText();
-          throw new Error(event.error.errorMessage || 'Provider request failed.');
-        }
-        if (event.type === 'done') {
-          if (process.env.CODEX_PI_DEBUG) console.error(`[pi-codex] done reason=${event.reason} output_tokens=${event.message.usage.output}`);
-          const content = event.message.content;
-          const phaseAt = index => event.reason === 'stop' && index === content.length - 1 ? 'final_answer' : 'commentary';
-          if (pendingText) finishPendingText(phaseAt(pendingText.index));
-          content.forEach((block, index) => finish(index, block, phaseAt(index)));
-          response.usage = usage(event.message.usage);
-          response.status = event.reason === 'length' ? 'incomplete' : 'completed';
-          if (event.reason === 'length') response.incomplete_details = { reason: 'max_output_tokens' };
-          emit(event.reason === 'length' ? 'response.incomplete' : 'response.completed', { response });
-          complete = true;
-          break;
-        }
-        if (event.contentIndex === undefined) continue;
-        // Claude supplies no message phase. The next block or stop reason tells
-        // us whether this text was commentary or the final answer. Complete it
-        // before announcing the next tool so Codex restores its working status.
-        if (pendingText && event.contentIndex !== pendingText.index) finishPendingText();
-        const block = event.partial.content[event.contentIndex];
-        if (!block) throw new Error('Provider event has no content block.');
-        const state = start(event.contentIndex, block);
-        const fields = { item_id: state.id, output_index: state.output_index };
-        if (event.type === 'text_delta') emit('response.output_text.delta', { ...fields, content_index: 0, delta: event.delta });
-        if (event.type === 'thinking_delta' && showReasoning) emit('response.reasoning_summary_text.delta', { ...fields, summary_index: 0, delta: event.delta });
-        if (event.type === 'toolcall_delta' && !custom.has(block.name)) emit('response.function_call_arguments.delta', { ...fields, delta: event.delta });
-        if (event.type === 'toolcall_delta' && custom.has(block.name)) customDelta(state, block.arguments?.input);
-        if (event.type === 'text_end') pendingText = { index: event.contentIndex, block: { ...block } };
-        else if (event.type.endsWith('_end')) finish(event.contentIndex, block);
-      }
-      if (!complete) throw new Error('Provider stream ended without a completion event.');
-      if (request.stream) res.end(); else json(res, 200, response);
     } catch (error) {
       console.error(`[pi-codex] request failed: ${error.message}`);
       if (!res.destroyed) {
