@@ -60,6 +60,23 @@ test('reads persisted selection without modifying the rollout and declines incom
   assert.equal(await reader({ ...identity, threadId: '../auth' }), undefined);
 });
 
+test('finds the active turn in a resumed rollout alongside the original file', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'compaction-resumed-reader-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const folder = join(dir, 'sessions', '2026', '10', '29');
+  await mkdir(folder, { recursive: true });
+  const encode = rows => rows.map(row => JSON.stringify(row) + '\n').join('');
+  await writeFile(join(folder, `rollout-original-${threadId}.jsonl`), encode([
+    settings(modelId), { ...started, payload: { ...started.payload, turn_id: threadId } },
+  ]));
+  const resumed = join(folder, `rollout-resumed-${threadId}_${turnId}.jsonl`);
+  await writeFile(resumed, encode([settings(), started]));
+  const reader = createSelectedModelReader(dir);
+  assert.deepEqual(await reader(identity), selected);
+  await writeFile(join(folder, `rollout-duplicate-${threadId}_${threadId}.jsonl`), encode([settings(), started]));
+  assert.equal(await reader(identity), undefined, 'ambiguous active turns must not redirect');
+});
+
 async function fixture(t, { streamSimple, fetchImpl, selectedModel = async () => selected } = {}) {
   const claudeCalls = [];
   const openaiCalls = [];
