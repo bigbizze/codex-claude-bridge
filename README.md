@@ -218,6 +218,8 @@ Thinking blocks and provider signatures are encrypted into Responses reasoning i
 
 Supported: text, base64 images, developer instructions, streamed output, namespace/function/custom tools (including apply_patch), tool results, reasoning effort, reasoning signature replay, cache-aware token usage, cancellation, and full-history resume.
 
+Claude receives readable tool names: `functions` tools keep their names, other namespaces become `<namespace>__<name>`, and characters outside `[a-zA-Z0-9_-]` become `_`. Tool names that are equal when case is ignored are rejected, because Pi's Claude OAuth transport maps returned names without case sensitivity. When Claude calls an undeclared name, the bridge sends that name to Codex unchanged. Codex returns `unsupported call: <name>` as the tool result, and Claude can correct the call in the same turn. The bridge never maps an unknown name to a declared tool.
+
 For Claude, unsupported requests fail explicitly: provider-hosted tools, remote image URLs, input files, Responses compaction items, background Responses jobs, previous_response_id continuation, and forced tool selection. Codex's native web search stays disabled for mixed sessions so their histories can return to Claude. Local/MCP tools can still run through Codex. Claude custom grammar tools are adapted to a JSON string argument; the provider does not enforce the original grammar.
 
 The request limit is 16 MiB. Model requests time out after 10 minutes without
