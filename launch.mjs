@@ -5,6 +5,7 @@ import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createHandoff, parseSwitch } from './handoff.mjs';
+import { createLocalCertificates } from './certs.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const model = process.env.CODEX_CLAUDE_MODEL || 'anthropic/claude-opus-5-5';
@@ -94,6 +95,14 @@ async function main() {
   const token = randomBytes(32).toString('hex');
   const readyFile = join(runtimeDir, 'ready.json');
   const env = { ...process.env, CODEX_PI_BRIDGE_TOKEN: token, CODEX_PI_STATE_KEY_FILE: keyFile, CODEX_PI_READY_FILE: readyFile, CODEX_PI_OPENAI_CATALOG: openaiCatalogFile };
+  // Claude limits in /status need a local HTTPS ChatGPT backend. Without openssl
+  // the bridge still works, and /status shows ChatGPT limits only.
+  let certificates;
+  if (process.env.CODEX_BRIDGE_STATUS !== '0') {
+    try { certificates = await createLocalCertificates(runtimeDir); }
+    catch (error) { console.error(`Claude limits will not show in /status: cannot create a local certificate (${error.code === 'ENOENT' ? 'openssl is not installed' : error.message}).`); }
+  }
+  if (certificates) Object.assign(env, { CODEX_PI_TLS_KEY: certificates.key, CODEX_PI_TLS_CERT: certificates.cert });
   const pi = child('pi', ['--mode', 'rpc', '--no-session', '--no-extensions', '-e', join(here, 'extension.ts'),
     '--no-skills', '--no-context-files', '--no-prompt-templates', '--no-themes', '--no-tools', '--model', model],
     { env, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -110,6 +119,10 @@ async function main() {
     if (!ready) await Promise.race([new Promise(resolve => setTimeout(resolve, 100)), pi.result.then(() => { throw new Error(`Pi exited before bridge startup. ${errors}`); })]);
   }
   if (!ready.catalog.models.some(item => item.slug === model)) throw new Error(`${model} is unavailable. Run pi and /login anthropic.`);
+  if (ready.backendPort) {
+    env.CODEX_CA_CERTIFICATE = certificates.ca;
+    delete env.CODEX_PI_TLS_KEY; delete env.CODEX_PI_TLS_CERT;
+  }
   const catalogFile = join(runtimeDir, 'models.json');
   writeFileSync(catalogFile, JSON.stringify(ready.catalog), { mode: 0o600 });
   const config = [
@@ -123,6 +136,7 @@ async function main() {
     '-c', `model_catalog_json=${JSON.stringify(catalogFile)}`,
     '-c', 'model_reasoning_effort="medium"',
     '-c', 'web_search="disabled"',
+    ...(ready.backendPort ? ['-c', `chatgpt_base_url="https://localhost:${ready.backendPort}/backend-api/"`] : []),
     '-m', model,
   ];
   if (userArgs.length === 1 && userArgs[0] === '--check') {
