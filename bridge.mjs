@@ -10,18 +10,24 @@ export class RequestError extends Error {
   constructor(message, status = 400) { super(message); this.status = status; }
 }
 const instructions = readFileSync(new URL('./codex-instructions.md', import.meta.url), 'utf8');
-const wireName = (name, namespace) => 'tool_' + createHash('sha256').update(JSON.stringify([namespace || null, name])).digest('hex').slice(0, 32);
+// Claude must reproduce tool names exactly. Keep them readable: opaque hashes are
+// copied with typos, and a mistyped name used to fail the whole turn.
+const qualifiedName = (name, namespace) => namespace && namespace !== 'functions' ? `${namespace.replace(/_+$/, '')}__${name}` : name;
+function wireName(name, namespace) {
+  const qualified = qualifiedName(name, namespace);
+  const safe = qualified.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return safe.length <= 128 ? safe : `${safe.slice(0, 119)}_${createHash('sha256').update(qualified).digest('hex').slice(0, 8)}`;
+}
 
 function toolInstructions(toolMap, toolChoice, hasPlanner) {
   const lines = [
-    '## Current bridge tool bindings',
+    '## Current bridge tools',
     'Only the tools declared on this request are callable. Earlier instructions, examples, plans, and historical calls do not make other tools available.',
-    'Codex tool references are mapped to the exact provider tool names below. Use those declared names verbatim; never invent aliases or placeholder tools.',
   ];
   if (toolChoice === 'none' || toolMap.size === 0) {
     lines.push('No tool calls are permitted on this request. Respond with text instead.');
   } else {
-    for (const [name, original] of toolMap) lines.push(JSON.stringify({ codex_tool: original, provider_tool: name }));
+    lines.push('A Codex tool in a namespace other than `functions` is declared as `<namespace>__<name>`, for example `multi_agent_v1__spawn_agent`.');
   }
   if (toolChoice === 'none' || !hasPlanner) {
     lines.push('The Codex update_plan tool is not available on this request. When a plan is useful, describe it briefly in text. Do not invent substitute tools or use unrelated tools with similar names to satisfy a planning instruction.');
@@ -86,7 +92,7 @@ export function translate(request, model, codec) {
   const historicalTools = new Map();
   if (request.tools === undefined) {
     for (const entry of canonical.entries) if (entry.kind === 'tool_definitions') {
-      for (const tool of flattenTools(entry.tools)) historicalTools.set(wireName(tool.name, tool.namespace), tool);
+      for (const tool of flattenTools(entry.tools)) historicalTools.set(qualifiedName(tool.name, tool.namespace), tool);
     }
   }
   const flatTools = request.tools === undefined ? [...historicalTools.values()] : flattenTools(request.tools);
@@ -96,11 +102,16 @@ export function translate(request, model, codec) {
       plan?.type === 'array' && plan.items?.properties?.step?.type === 'string' &&
       ['pending', 'in_progress', 'completed'].every(status => plan.items?.properties?.status?.enum?.includes(status));
   });
+  const declared = new Map();
+  const folded = new Set();
   const tools = flatTools.map(tool => {
     if (!['function', 'custom'].includes(tool.type)) throw new RequestError(`Unsupported tool type: ${tool.type}. Disable provider-hosted tools for this bridge.`);
     if (typeof tool.name !== 'string' || !tool.name) throw new RequestError('A tool name is required.');
     const name = wireName(tool.name, tool.namespace);
-    if (toolMap.has(name)) throw new RequestError(`Duplicate tool: ${tool.name}`);
+    // Pi's Claude OAuth transport maps returned names back without case sensitivity.
+    if (folded.has(name.toLowerCase())) throw new RequestError(`Duplicate tool name for Claude: ${name}`);
+    folded.add(name.toLowerCase());
+    declared.set(qualifiedName(tool.name, tool.namespace), name);
     toolMap.set(name, { name: tool.name, ...(tool.namespace ? { namespace: tool.namespace } : {}) });
     if (tool.type === 'custom') custom.add(name);
     return { name, description: tool.description || '', parameters: tool.type === 'custom'
@@ -109,7 +120,10 @@ export function translate(request, model, codec) {
   });
   if (request.tool_choice && !['auto', 'none'].includes(request.tool_choice)) throw new RequestError('Only auto and none tool choices are supported.');
   let messages;
-  try { messages = toAnthropic(canonical, model, { codec, toolName: wireName }); }
+  // Replay calls to undeclared tools with their original names. Rewriting them
+  // could make a failed call look like a call to a declared tool.
+  const toolName = (name, namespace) => declared.get(qualifiedName(name, namespace)) ?? qualifiedName(name, namespace);
+  try { messages = toAnthropic(canonical, model, { codec, toolName }); }
   catch (error) { throw new RequestError(error.message); }
   const effort = request.reasoning?.effort ?? 'medium';
   if (!['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(effort)) throw new RequestError(`Unsupported reasoning effort: ${effort}`);
@@ -150,8 +164,9 @@ function outputItem(block, id, custom, toolMap, codec, model, final, showReasoni
   if (block.type === 'text') return { id, type: 'message', role: 'assistant', phase, status: final ? 'completed' : 'in_progress', content: final ? [{ type: 'output_text', text: block.text, annotations: [] }] : [] };
   if (block.type === 'thinking') return { id, type: 'reasoning', summary: final && showReasoning && !block.redacted ? [{ type: 'summary_text', text: block.thinking }] : [], ...(final ? { encrypted_content: codec.seal(block, model) } : {}) };
   if (block.type !== 'toolCall') throw new Error(`Unsupported provider block: ${block.type}`);
-  const original = toolMap.get(block.name);
-  if (!original) throw new Error(`Provider called an undeclared tool: ${block.name}`);
+  // Codex answers an unknown name with an "unsupported call" tool result, so the
+  // model can correct the name in the same turn. Never guess a declared tool.
+  const original = toolMap.get(block.name) ?? { name: block.name };
   if (custom.has(block.name)) return { id, type: 'custom_tool_call', call_id: block.id, ...original, input: final ? String(block.arguments.input ?? '') : '' };
   return { id, type: 'function_call', call_id: block.id, ...original, arguments: final ? JSON.stringify(block.arguments) : '', status: final ? 'completed' : 'in_progress' };
 }
@@ -342,7 +357,7 @@ export function createBridge({ registry, token, codec, requestTimeoutMs = 600000
       if (!res.destroyed) {
         const code = /context.*(exceed|long)|prompt is too long/i.test(error.message) ? 'context_length_exceeded'
           : /429|rate.limit/i.test(error.message) ? 'rate_limit_exceeded'
-          : /400|invalid_request|unsupported|undeclared tool/i.test(error.message) ? 'invalid_prompt' : 'server_error';
+          : /400|invalid_request|unsupported/i.test(error.message) ? 'invalid_prompt' : 'server_error';
         if (res.headersSent) res.end(`event: response.failed\ndata: ${JSON.stringify({ type: 'response.failed', sequence_number: sequence++, response: { id: responseId, status: 'failed', error: { code, message: error.message } } })}\n\n`);
         else json(res, error.status || 502, { error: { message: error.message } });
       }

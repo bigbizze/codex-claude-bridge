@@ -173,28 +173,32 @@ test('preserves namespace calls, parallel calls, custom inputs, developer instru
   assert.deepEqual(result.toolMap.get(result.context.tools[0].name), { name: 'exec_command', namespace: 'functions' });
 });
 
-test('current tool bindings explain hashed names and override stale planning instructions', () => {
+test('tools keep readable names, reject case collisions and override stale planning instructions', () => {
   const result = translate({ instructions: 'You have access to update_plan.', input: 'Continue', tools: [
     { type: 'namespace', name: 'functions', tools: [{ type: 'function', name: 'exec_command' }, { type: 'custom', name: 'apply_patch' }] },
     { type: 'namespace', name: 'other', tools: [{ type: 'function', name: 'exec_command' }] },
+    { type: 'namespace', name: 'mcp__codex_worktrees__', tools: [{ type: 'function', name: 'create.worktree' }] },
   ] }, model, codec);
   const prompt = result.context.systemPrompt;
   assert.match(prompt, /update_plan tool is not available/);
-  assert.match(prompt, /never invent aliases or placeholder tools/);
-  for (const [name, original] of result.toolMap) assert.ok(prompt.includes(JSON.stringify({ codex_tool: original, provider_tool: name })));
-  assert.equal(new Set(result.context.tools.map(tool => tool.name)).size, 3);
+  assert.deepEqual(result.context.tools.map(tool => tool.name), ['exec_command', 'apply_patch', 'other__exec_command', 'mcp__codex_worktrees__create_worktree']);
+  assert.deepEqual(result.toolMap.get('mcp__codex_worktrees__create_worktree'), { name: 'create.worktree', namespace: 'mcp__codex_worktrees__' });
+  assert.throws(() => translate({ input: 'Hi', tools: [{ type: 'function', name: 'Read' }, { type: 'function', name: 'read' }] }, model, codec), /Duplicate tool name/);
   const replay = translate({ tools: [{ type: 'function', name: 'exec_command' }], input: [
     { type: 'function_call', name: 'exec_command', call_id: 'old', arguments: '{}' },
     { type: 'function_call_output', call_id: 'old', output: 'done' },
+    { type: 'function_call', name: 'tool_d4ea5c989ec1abc73f5fcebc e9d3e9d3', call_id: 'typo', arguments: '{}' },
+    { type: 'function_call_output', call_id: 'typo', output: 'unsupported call: tool_d4ea5c989ec1abc73f5fcebc e9d3e9d3' },
   ] }, model, codec);
-  assert.equal(replay.context.messages[0].content[0].name, replay.context.tools[0].name);
+  assert.equal(replay.context.messages[0].content[0].name, 'exec_command');
+  assert.equal(replay.context.messages[2].content[0].name, 'tool_d4ea5c989ec1abc73f5fcebc e9d3e9d3');
 });
 
 test('available plan tools are mapped normally and disabled requests forbid calls', () => {
   const tools = [{ type: 'function', name: 'update_plan', parameters: { type: 'object', properties: { plan: { type: 'array', items: { type: 'object', properties: { step: { type: 'string' }, status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] } } } } } } }];
   const available = translate({ input: 'Plan', tools }, model, codec);
   assert.doesNotMatch(available.context.systemPrompt, /update_plan tool is not available/);
-  assert.ok(available.context.systemPrompt.includes(available.context.tools[0].name));
+  assert.equal(available.context.tools[0].name, 'update_plan');
   const namespaced = translate({ input: 'Plan', tools: [{ type: 'namespace', name: 'functions', tools }] }, model, codec);
   assert.doesNotMatch(namespaced.context.systemPrompt, /update_plan tool is not available/);
   for (const unrelated of [
@@ -209,15 +213,14 @@ test('available plan tools are mapped normally and disabled requests forbid call
   }
 });
 
-test('undeclared placeholder calls still fail instead of executing a guessed tool', async t => {
+test('undeclared calls go to Codex unchanged so the model can correct them', async t => {
   const { request } = await start(t, async function* () {
-    yield { type: 'done', reason: 'toolUse', message: assistant([{ type: 'toolCall', id: 'bad', name: 'tool_update_plan_placeholder', arguments: {} }]) };
+    yield { type: 'done', reason: 'toolUse', message: assistant([{ type: 'toolCall', id: 'bad', name: 'Update_Plan', arguments: {} }]) };
   });
   const response = await request({ stream: true, tools: [{ type: 'function', name: 'update_plan' }] });
   const data = events(await response.text());
-  assert.equal(data.at(-1).type, 'response.failed');
-  assert.match(data.at(-1).response.error.message, /undeclared tool/);
-  assert.ok(!data.some(event => event.type === 'response.output_item.added'));
+  assert.equal(data.at(-1).type, 'response.completed');
+  assert.deepEqual(data.at(-1).response.output.map(item => [item.type, item.name, item.namespace]), [['function_call', 'Update_Plan', undefined]]);
 });
 
 test('rejects unsupported inputs, broken tool history and altered reasoning', () => {
