@@ -231,7 +231,7 @@ export function createBridge({ registry, token, codec, requestTimeoutMs = 600000
         if (openai?.catalog.models.some(entry => entry.slug === request.model?.replace(/^openai\//, ''))) {
           if (!req.headers['x-codex-bridge-token'] || req.headers.authorization === `Bearer ${token}`) throw new RequestError('OpenAI requests require Codex authentication and the bridge token.', 401);
           const onRateLimit = async ({ body, headers }) => await fallback() || await waitForLimit({ provider: 'openai', label: request.model,
-            resetsAt: await openaiResetAt({ usage: usageReader, body, headers, requestHeaders: req.headers }) });
+            resetAt: () => openaiResetAt({ usage: usageReader, body, headers, requestHeaders: req.headers }) });
           const forwarded = await forwardOpenAI({ request, headers: req.headers, response: res, signal: controller.signal, onActivity: resetIdleTimeout, onRateLimit, ...openai });
           if (forwarded === false) continue;
           return;
@@ -352,7 +352,7 @@ export function createBridge({ registry, token, codec, requestTimeoutMs = 600000
           if (!complete) throw new Error('Provider stream ended without a completion event.');
         } catch (error) {
           if (!blocks.size && isRateLimitError(error.message) && (await fallback() || await waitForLimit({ provider: 'anthropic', label: request.model,
-            resetsAt: await claudeResetAt({ usage: usageReader, error }) }))) continue;
+            resetAt: () => claudeResetAt({ usage: usageReader, error, model: request.model }) }))) continue;
           startStream();
           throw error;
         }

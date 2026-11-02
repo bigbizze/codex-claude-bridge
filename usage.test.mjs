@@ -26,12 +26,18 @@ test('both providers parse into one shape and find the reset of a full window', 
   assert.deepEqual(parsed.windows.map(item => [item.id, item.usedPercent]), [['five_hour', 41], ['seven_day', 70], ['weekly_scoped:Fable', 45]]);
   assert.equal(parsed.windows[0].resetsAt, Date.parse('2026-11-03T00:10:00.349Z'));
   assert.equal(nextReset(parsed, now), undefined);
+  // A full scoped limit blocks only its own model.
   const scopedFull = parseClaudeUsage({ ...claude, limits: [{ ...claude.limits[2], percent: 100 }] });
-  assert.equal(nextReset(scopedFull, now), Date.parse('2026-11-03T08:00:00.349Z'));
+  assert.equal(nextReset(scopedFull, now, 'anthropic/claude-fable-5-1'), Date.parse('2026-11-03T08:00:00.349Z'));
+  assert.equal(nextReset(scopedFull, now, 'anthropic/claude-opus-5-5'), undefined);
   const sessionFull = parseClaudeUsage({ ...claude, five_hour: { ...claude.five_hour, utilization: 100 } });
-  assert.equal(nextReset(sessionFull, now), Date.parse('2026-11-03T00:10:00.349Z'));
+  assert.equal(nextReset(sessionFull, now, 'anthropic/claude-opus-5-5'), Date.parse('2026-11-03T00:10:00.349Z'));
+  // With two full windows, the request can succeed only after the later reset.
+  const bothFull = parseClaudeUsage({ ...claude, five_hour: { ...claude.five_hour, utilization: 100 }, seven_day: { ...claude.seven_day, utilization: 100 } });
+  assert.equal(nextReset(bothFull, now), Date.parse('2026-11-03T08:00:00.349Z'));
 
-  const gpt = parseOpenAIUsage({ ...openai, rate_limit: { ...openai.rate_limit, primary_window: { ...openai.rate_limit.primary_window, used_percent: 100 } } });
+  const gpt = parseOpenAIUsage({ ...openai, rate_limit: { ...openai.rate_limit, primary_window: { ...openai.rate_limit.primary_window, used_percent: 100 } },
+    additional_rate_limits: [{ metered_feature: 'other', rate_limit: { primary_window: { used_percent: 100, reset_at: 1893797146 } } }] });
   assert.equal(gpt.windows.length, 1);
   assert.equal(nextReset(gpt, now), 1793797146000);
   assert.equal(nextReset(parseOpenAIUsage(openai), now), undefined);
@@ -46,6 +52,8 @@ test('Claude usage becomes a Codex additional_rate_limits entry', () => {
   assert.deepEqual(entry.rate_limit.primary_window, { used_percent: 41, limit_window_seconds: 18000, reset_at: 1793664600, reset_after_seconds: 4200 });
   assert.equal(entry.rate_limit.secondary_window.limit_window_seconds, 604800);
   assert.equal(codexRateLimit(parseClaudeUsage({ five_hour: null, seven_day: claude.seven_day }), now).rate_limit.primary_window, null);
+  // Codex rejects a window without reset fields, so such a window must be null.
+  assert.equal(codexRateLimit(parseClaudeUsage({ ...claude, five_hour: { utilization: 0, resets_at: null } }), now).rate_limit.primary_window, null);
 });
 
 test('usage requests fail closed and share one cached Claude request', async () => {

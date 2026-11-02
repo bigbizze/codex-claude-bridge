@@ -6,8 +6,9 @@ const timeMs = value => {
   const parsed = typeof value === 'string' ? Date.parse(value) : NaN;
   return Number.isNaN(parsed) ? undefined : parsed;
 };
-const window = (id, usedPercent, windowSeconds, resetsAt) =>
-  typeof usedPercent === 'number' && Number.isFinite(usedPercent) ? { id, usedPercent, windowSeconds, resetsAt } : undefined;
+const window = (id, usedPercent, windowSeconds, resetsAt, scope) =>
+  typeof usedPercent === 'number' && Number.isFinite(usedPercent) ? { id, usedPercent, windowSeconds, resetsAt, ...(scope ? { scope } : {}) } : undefined;
+const words = value => String(value ?? '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
 
 export function parseClaudeUsage(data) {
   if (!data || typeof data !== 'object' || !('five_hour' in data || 'seven_day' in data)) return undefined;
@@ -17,7 +18,10 @@ export function parseClaudeUsage(data) {
     // Scoped limits, for example a weekly limit for one model, can block requests
     // while the two main windows are below 100%.
     ...(Array.isArray(data.limits) ? data.limits : []).filter(limit => !['session', 'weekly_all'].includes(limit?.kind))
-      .map(limit => window(`${limit.kind}:${limit.scope?.model?.display_name ?? limit.scope?.model?.id ?? ''}`, limit.percent, undefined, timeMs(limit.resets_at))),
+      .map(limit => {
+        const scope = limit.scope?.model?.id ?? limit.scope?.model?.display_name;
+        return window(`${limit.kind}:${scope ?? ''}`, limit.percent, undefined, timeMs(limit.resets_at), scope ? { model: scope } : undefined);
+      }),
   ].filter(Boolean);
   return { provider: 'anthropic', windows };
 }
@@ -26,29 +30,31 @@ export function parseOpenAIUsage(data) {
   if (!data || typeof data !== 'object' || !data.rate_limit) return undefined;
   const fromLimit = (prefix, limit) => ['primary_window', 'secondary_window'].map(name => limit?.[name] &&
     window(`${prefix}${name}`, limit[name].used_percent, limit[name].limit_window_seconds, timeMs(limit[name].reset_at)));
-  const windows = [
-    ...fromLimit('', data.rate_limit),
-    ...(Array.isArray(data.additional_rate_limits) ? data.additional_rate_limits : [])
-      .flatMap(entry => fromLimit(`${entry?.metered_feature ?? entry?.limit_name ?? 'additional'}:`, entry?.rate_limit)),
-  ].filter(Boolean);
-  return { provider: 'openai', windows };
+  // additional_rate_limits are other metered features, not Codex model requests.
+  return { provider: 'openai', windows: fromLimit('', data.rate_limit).filter(Boolean) };
 }
 
-// The earliest reset of a full window. If a later window is also full, the retry
-// fails again and the caller waits for that window in its next cycle.
-export function nextReset(usage, now = Date.now()) {
-  const resets = (usage?.windows ?? []).filter(item => item.usedPercent >= 100 && item.resetsAt > now).map(item => item.resetsAt);
-  return resets.length ? Math.min(...resets) : undefined;
+// A scoped window applies when each word of its model name is in the request
+// model id, for example scope "Fable" and model "anthropic/claude-fable-5-1".
+const applies = (item, model) => !item.scope || (model !== undefined && words(item.scope.model).every(word => words(model).includes(word)));
+
+// A request succeeds only after every full window that applies to it resets, so
+// use the latest of those resets.
+export function nextReset(usage, now = Date.now(), model) {
+  const resets = (usage?.windows ?? []).filter(item => item.usedPercent >= 100 && item.resetsAt > now && applies(item, model)).map(item => item.resetsAt);
+  return resets.length ? Math.max(...resets) : undefined;
 }
 
 // Codex `additional_rate_limits` entry for `/wham/usage`.
 export function codexRateLimit(usage, now = Date.now()) {
   const codexWindow = id => {
     const item = usage.windows.find(entry => entry.id === id);
-    if (!item) return null;
-    const resetAt = item.resetsAt === undefined ? undefined : Math.floor(item.resetsAt / 1000);
+    // Codex requires reset fields in each window. An invalid window would make
+    // Codex reject the whole response, including the ChatGPT limits.
+    if (!item || item.resetsAt === undefined) return null;
+    const resetAt = Math.floor(item.resetsAt / 1000);
     return { used_percent: Math.round(item.usedPercent), limit_window_seconds: item.windowSeconds,
-      ...(resetAt === undefined ? {} : { reset_at: resetAt, reset_after_seconds: Math.max(0, resetAt - Math.floor(now / 1000)) }) };
+      reset_at: resetAt, reset_after_seconds: Math.max(0, resetAt - Math.floor(now / 1000)) };
   };
   const limitReached = usage.windows.some(item => item.usedPercent >= 100);
   return { limit_name: 'Claude', metered_feature: 'claude',

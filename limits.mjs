@@ -43,8 +43,10 @@ const clock = time => new Date(time).toLocaleTimeString([], { hour: '2-digit', m
 // the same request again, or false when the caller must return the original error.
 export function createLimitWait({ policy, signal, pauseIdle = () => {}, resumeIdle = () => {}, log = console.error, now = Date.now, stepMs }) {
   let cycles = 0;
-  return async ({ provider, label, resetsAt }) => {
-    if (!policy[provider] || resetsAt === undefined || cycles >= policy.maxCycles || signal.aborted) return false;
+  return async ({ provider, label, resetAt }) => {
+    if (!policy[provider] || cycles >= policy.maxCycles || signal.aborted) return false;
+    const resetsAt = await resetAt();
+    if (resetsAt === undefined || signal.aborted) return false;
     const target = resetsAt + policy.marginMs;
     const waitMs = target - now();
     if (waitMs > policy.maxWaitMs) {
@@ -65,8 +67,8 @@ export const isRateLimitError = message => /\b429\b|rate_limit_error|rate.limit.
 
 // Pi rejects a retry-after above its 60 s maximum with this message. Use it only
 // when the usage endpoint is unavailable.
-export async function claudeResetAt({ usage, error, now = Date.now }) {
-  const reset = nextReset(await usage?.claude({ fresh: true }), now());
+export async function claudeResetAt({ usage, error, model, now = Date.now }) {
+  const reset = nextReset(await usage?.claude({ fresh: true }), now(), model);
   if (reset !== undefined) return reset;
   const seconds = /Server requested (\d+)s retry delay/.exec(error.message)?.[1];
   return seconds ? now() + Number(seconds) * 1000 : undefined;

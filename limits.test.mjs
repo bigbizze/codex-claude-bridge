@@ -11,7 +11,7 @@ test('the wait follows the wall clock, stops on abort, and pauses the idle timer
   const idle = [];
   const wait = createLimitWait({ policy, signal: controller.signal, log: quiet, pauseIdle: () => idle.push('pause'), resumeIdle: () => idle.push('resume') });
   let done = false;
-  const result = wait({ provider: 'anthropic', label: 'claude', resetsAt: 3600000 }).then(value => { done = value; });
+  const result = wait({ provider: 'anthropic', label: 'claude', resetAt: async () => 3600000 }).then(value => { done = value; });
   await new Promise(setImmediate);
   assert.deepEqual(idle, ['pause']);
   // A computer that sleeps moves the wall clock without firing timers.
@@ -21,7 +21,7 @@ test('the wait follows the wall clock, stops on abort, and pauses the idle timer
   assert.equal(done, true);
   assert.deepEqual(idle, ['pause', 'resume']);
 
-  const aborted = wait({ provider: 'anthropic', label: 'claude', resetsAt: Date.now() + 3600000 });
+  const aborted = wait({ provider: 'anthropic', label: 'claude', resetAt: async () => Date.now() + 3600000 });
   await new Promise(setImmediate);
   controller.abort(new Error('Client disconnected.'));
   await assert.rejects(aborted, /Client disconnected/);
@@ -31,15 +31,17 @@ test('the wait follows the wall clock, stops on abort, and pauses the idle timer
 test('no wait without opt-in, a known reset, a reset within the maximum, or remaining cycles', async () => {
   const signal = new AbortController().signal;
   const wait = createLimitWait({ policy: { ...policy, maxCycles: 1 }, signal, log: quiet, stepMs: 1 });
-  assert.equal(await wait({ provider: 'openai', label: 'gpt', resetsAt: Date.now() }), false);
-  assert.equal(await wait({ provider: 'anthropic', label: 'claude', resetsAt: undefined }), false);
-  assert.equal(await wait({ provider: 'anthropic', label: 'claude', resetsAt: Date.now() + 7 * 3600000 }), false);
-  assert.equal(await wait({ provider: 'anthropic', label: 'claude', resetsAt: Date.now() - 60000 }), true);
-  assert.equal(await wait({ provider: 'anthropic', label: 'claude', resetsAt: Date.now() - 60000 }), false);
-  assert.equal(await createLimitWait({ policy: {}, signal, log: quiet })({ provider: 'anthropic', resetsAt: Date.now() }), false);
+  assert.equal(await wait({ provider: 'openai', label: 'gpt', resetAt: async () => Date.now() }), false);
+  assert.equal(await wait({ provider: 'anthropic', label: 'claude', resetAt: async () => undefined }), false);
+  assert.equal(await wait({ provider: 'anthropic', label: 'claude', resetAt: async () => Date.now() + 7 * 3600000 }), false);
+  assert.equal(await wait({ provider: 'anthropic', label: 'claude', resetAt: async () => Date.now() - 60000 }), true);
+  assert.equal(await wait({ provider: 'anthropic', label: 'claude', resetAt: async () => Date.now() - 60000 }), false);
+  let looked = false;
+  assert.equal(await createLimitWait({ policy: {}, signal, log: quiet })({ provider: 'anthropic', resetAt: async () => { looked = true; return Date.now(); } }), false);
+  assert.equal(looked, false, 'a disabled wait must not request usage');
 });
 
-test('OpenAI reset time comes from the error body, then usage, and a plain 429 does not wait', async () => {
+test('OpenAI reset time comes from the error body, then usage, and is unknown without either', async () => {
   const headers = new Headers({ 'retry-after': '30' });
   const now = () => 1000000;
   const body = JSON.stringify({ error: { type: 'usage_limit_reached', resets_at: 5000 } });

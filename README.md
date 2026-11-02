@@ -221,7 +221,7 @@ Thinking blocks and provider signatures are encrypted into Responses reasoning i
 ChatGPT limits. Codex reads limits only from its ChatGPT backend, and it
 requires HTTPS for that backend. So each launch does these steps:
 
-1. It creates a CA and a `localhost` certificate with `openssl`, valid for 2
+1. It creates a CA and a `localhost` certificate with `openssl`, valid for 30
    days, in the temporary run folder. It deletes the CA private key after it
    signs the certificate, so the CA cannot sign other certificates.
 2. Pi serves a loopback HTTPS proxy. The proxy sends every request to
@@ -229,7 +229,8 @@ requires HTTPS for that backend. So each launch does these steps:
    adds one `claude` entry from Anthropic's usage endpoint (cached for 60 s).
 3. Codex starts with `chatgpt_base_url` set to the proxy and
    `CODEX_CA_CERTIFICATE` set to the CA. This adds one trusted CA for that
-   Codex process only. The system certificates stay trusted.
+   Codex process only. The system certificates stay trusted. If you already set
+   `CODEX_CA_CERTIFICATE`, the bridge adds its CA to a copy of your file.
 
 If `openssl` is missing or the Claude usage request fails, `/status` shows the
 ChatGPT limits only. Set `CODEX_BRIDGE_STATUS=0` to turn this off. Claude
@@ -239,7 +240,8 @@ When a model reaches its usage limit before it sends any output, the bridge
 can wait until the limit resets and then send the same request again. Codex
 shows `Working` during the wait, and the turn continues after the reset. The
 bridge gets the reset time from the provider usage endpoint (for OpenAI, first
-from the error). It waits in steps of 1 minute against the wall clock, so it
+from the error). It waits for the latest reset of the full windows that apply
+to the model, for example the 5-hour, weekly and model-specific weekly limits. It waits in steps of 1 minute against the wall clock, so it
 also works after the computer sleeps. Press Esc to stop the wait. Set
 `CODEX_PI_DEBUG=1` to see the reason and the reset time in the bridge log.
 
