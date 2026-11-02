@@ -136,7 +136,7 @@ async function main() {
     '-c', `model_catalog_json=${JSON.stringify(catalogFile)}`,
     '-c', 'model_reasoning_effort="medium"',
     '-c', 'web_search="disabled"',
-    ...(ready.backendPort ? ['-c', `chatgpt_base_url="https://localhost:${ready.backendPort}/backend-api/"`] : []),
+    ...(ready.backendPort ? ['-c', `chatgpt_base_url="https://localhost:${ready.backendPort}/${token}/backend-api/"`] : []),
     '-m', model,
   ];
   if (userArgs.length === 1 && userArgs[0] === '--check') {

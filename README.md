@@ -230,7 +230,10 @@ requires HTTPS for that backend. So each launch does these steps:
 3. Codex starts with `chatgpt_base_url` set to the proxy and
    `CODEX_CA_CERTIFICATE` set to the CA. This adds one trusted CA for that
    Codex process only. The system certificates stay trusted. If you already set
-   `CODEX_CA_CERTIFICATE`, the bridge adds its CA to a copy of your file.
+   `CODEX_CA_CERTIFICATE` or `SSL_CERT_FILE`, the bridge adds its CA to a copy
+   of that file. The proxy accepts only requests whose path starts with the
+   per-launch bridge token. If you use TLS inspection, set `NODE_EXTRA_CA_CERTS`
+   for the bridge so the proxy can reach `chatgpt.com`.
 
 If `openssl` is missing or the Claude usage request fails, `/status` shows the
 ChatGPT limits only. Set `CODEX_BRIDGE_STATUS=0` to turn this off. Claude
@@ -251,7 +254,8 @@ also works after the computer sleeps. Press Esc to stop the wait. Set
 | `CODEX_BRIDGE_WAIT_OPENAI` | off | Set to `1` to wait for OpenAI limits. When on, Codex cannot offer its own limit options, such as a model switch, for that request. |
 | `CODEX_BRIDGE_WAIT_MAX` | `6h` | Longest wait, for example `90m` or `2h`. A later reset fails at once. |
 
-The bridge waits at most 3 times for one request. A limit error after output
+The bridge waits at most 3 times for one request, so one request can wait
+for up to 3 times `CODEX_BRIDGE_WAIT_MAX`. A limit error after output
 has started fails the turn as before.
 
 ## Supported and unsupported operations

@@ -26,7 +26,7 @@ export default function (pi: any) {
     await listen(bridge.server);
     let backendPort;
     if (process.env.CODEX_PI_TLS_KEY && process.env.CODEX_PI_TLS_CERT) {
-      backend = createBackend({ key: readFileSync(process.env.CODEX_PI_TLS_KEY), cert: readFileSync(process.env.CODEX_PI_TLS_CERT), usageReader, log: console.error });
+      backend = createBackend({ key: readFileSync(process.env.CODEX_PI_TLS_KEY), cert: readFileSync(process.env.CODEX_PI_TLS_CERT), secret: token, usageReader, log: console.error });
       await listen(backend);
       const address = backend.address();
       backendPort = typeof address === 'object' && address?.port;

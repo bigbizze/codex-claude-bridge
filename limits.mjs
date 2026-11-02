@@ -65,8 +65,8 @@ export function createLimitWait({ policy, signal, pauseIdle = () => {}, resumeId
 
 export const isRateLimitError = message => /\b429\b|rate_limit_error|rate.limit.exceeded/i.test(message);
 
-// Pi rejects a retry-after above its 60 s maximum with this message. Use it only
-// when the usage endpoint is unavailable.
+// Pi rejects a retry-after above its 60 s maximum with this message. Use it when
+// the usage endpoint is unavailable or shows no full window for this model.
 export async function claudeResetAt({ usage, error, model, now = Date.now }) {
   const reset = nextReset(await usage?.claude({ fresh: true }), now(), model);
   if (reset !== undefined) return reset;

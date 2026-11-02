@@ -32,6 +32,9 @@ test('both providers parse into one shape and find the reset of a full window', 
   assert.equal(nextReset(scopedFull, now, 'anthropic/claude-opus-5-5'), undefined);
   const sessionFull = parseClaudeUsage({ ...claude, five_hour: { ...claude.five_hour, utilization: 100 } });
   assert.equal(nextReset(sessionFull, now, 'anthropic/claude-opus-5-5'), Date.parse('2026-11-03T00:10:00.349Z'));
+  // Unknown limit kinds without a model scope cannot block a request.
+  const unknownFull = parseClaudeUsage({ ...claude, limits: [{ kind: 'new_kind', percent: 100, resets_at: '2026-11-09T00:00:00Z', scope: null }] });
+  assert.equal(nextReset(unknownFull, now, 'anthropic/claude-opus-5-5'), undefined);
   // With two full windows, the request can succeed only after the later reset.
   const bothFull = parseClaudeUsage({ ...claude, five_hour: { ...claude.five_hour, utilization: 100 }, seven_day: { ...claude.seven_day, utilization: 100 } });
   assert.equal(nextReset(bothFull, now), Date.parse('2026-11-03T08:00:00.349Z'));
@@ -52,6 +55,8 @@ test('Claude usage becomes a Codex additional_rate_limits entry', () => {
   assert.deepEqual(entry.rate_limit.primary_window, { used_percent: 41, limit_window_seconds: 18000, reset_at: 1793664600, reset_after_seconds: 4200 });
   assert.equal(entry.rate_limit.secondary_window.limit_window_seconds, 604800);
   assert.equal(codexRateLimit(parseClaudeUsage({ five_hour: null, seven_day: claude.seven_day }), now).rate_limit.primary_window, null);
+  // A full limit of another model does not mark Claude as limited.
+  assert.equal(codexRateLimit(parseClaudeUsage({ ...claude, limits: [{ ...claude.limits[2], percent: 100 }] }), now).rate_limit.limit_reached, false);
   // Codex rejects a window without reset fields, so such a window must be null.
   assert.equal(codexRateLimit(parseClaudeUsage({ ...claude, five_hour: { utilization: 0, resets_at: null } }), now).rate_limit.primary_window, null);
 });

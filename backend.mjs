@@ -16,12 +16,18 @@ export function mergeUsage(body, claude, now = Date.now()) {
   return { ...body, additional_rate_limits: [...others, codexRateLimit(claude, now)] };
 }
 
-export function createBackend({ key, cert, usageReader, fetchImpl = fetch, origin = `https://${ORIGIN}`, log = () => {} }) {
+// Codex cannot send a header to its backend, so the per-launch secret is the
+// first path segment of chatgpt_base_url. Other local users cannot use the proxy.
+const unprefixed = (path, secret) => path.startsWith(`/${secret}/`) ? path.slice(secret.length + 1) : undefined;
+
+export function createBackend({ key, cert, secret, usageReader, fetchImpl = fetch, origin = `https://${ORIGIN}`, log = () => {} }) {
   const server = https.createServer({ key, cert }, async (req, res) => {
     const controller = new AbortController();
     res.on('close', () => { if (!res.writableEnded) controller.abort(); });
+    const path = unprefixed(req.url, secret);
+    if (!path) { res.writeHead(404).end(); return; }
     try {
-      const url = new URL(req.url, origin);
+      const url = new URL(path, origin);
       if (url.origin !== origin) throw new Error('Absolute request URLs are not accepted.');
       const headers = new Headers();
       for (const [name, value] of Object.entries(req.headers)) {
@@ -59,8 +65,10 @@ export function createBackend({ key, cert, usageReader, fetchImpl = fetch, origi
   });
   // WebSocket upgrades go through unchanged as a TLS tunnel to the same origin.
   server.on('upgrade', (req, socket, head) => {
+    const path = unprefixed(req.url, secret);
+    if (!path) { socket.end('HTTP/1.1 404 Not Found\r\nconnection: close\r\n\r\n'); return; }
     const upstream = tls.connect({ host: ORIGIN, port: 443, servername: ORIGIN, ALPNProtocols: ['http/1.1'] }, () => {
-      const lines = [`${req.method} ${req.url} HTTP/1.1`, `host: ${ORIGIN}`];
+      const lines = [`${req.method} ${path} HTTP/1.1`, `host: ${ORIGIN}`];
       for (let index = 0; index < req.rawHeaders.length; index += 2) {
         if (req.rawHeaders[index].toLowerCase() !== 'host') lines.push(`${req.rawHeaders[index]}: ${req.rawHeaders[index + 1]}`);
       }

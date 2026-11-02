@@ -15,13 +15,12 @@ export function parseClaudeUsage(data) {
   const windows = [
     window('five_hour', data.five_hour?.utilization, 5 * HOUR, timeMs(data.five_hour?.resets_at)),
     window('seven_day', data.seven_day?.utilization, 7 * 24 * HOUR, timeMs(data.seven_day?.resets_at)),
-    // Scoped limits, for example a weekly limit for one model, can block requests
-    // while the two main windows are below 100%.
-    ...(Array.isArray(data.limits) ? data.limits : []).filter(limit => !['session', 'weekly_all'].includes(limit?.kind))
-      .map(limit => {
-        const scope = limit.scope?.model?.id ?? limit.scope?.model?.display_name;
-        return window(`${limit.kind}:${scope ?? ''}`, limit.percent, undefined, timeMs(limit.resets_at), scope ? { model: scope } : undefined);
-      }),
+    // A weekly limit for one model can block requests while the two main windows
+    // are below 100%. Other kinds are unknown, so they cannot block a request.
+    ...(Array.isArray(data.limits) ? data.limits : []).map(limit => {
+      const scope = limit?.scope?.model?.id ?? limit?.scope?.model?.display_name;
+      return scope && window(`${limit.kind}:${scope}`, limit.percent, undefined, timeMs(limit.resets_at), { model: scope });
+    }),
   ].filter(Boolean);
   return { provider: 'anthropic', windows };
 }
@@ -56,7 +55,7 @@ export function codexRateLimit(usage, now = Date.now()) {
     return { used_percent: Math.round(item.usedPercent), limit_window_seconds: item.windowSeconds,
       reset_at: resetAt, reset_after_seconds: Math.max(0, resetAt - Math.floor(now / 1000)) };
   };
-  const limitReached = usage.windows.some(item => item.usedPercent >= 100);
+  const limitReached = usage.windows.some(item => !item.scope && item.usedPercent >= 100 && item.resetsAt > now);
   return { limit_name: 'Claude', metered_feature: 'claude',
     rate_limit: { allowed: !limitReached, limit_reached: limitReached, primary_window: codexWindow('five_hour'), secondary_window: codexWindow('seven_day') } };
 }

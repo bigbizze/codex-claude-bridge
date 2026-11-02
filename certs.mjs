@@ -22,10 +22,10 @@ export async function createLocalCertificates(dir, { openssl = 'openssl' } = {})
   } finally {
     for (const name of [caKey, file('leaf.csr'), file('leaf.ext'), file('ca.srl')]) { try { unlinkSync(name); } catch {} }
   }
-  // CODEX_CA_CERTIFICATE holds one bundle. Keep a CA that the user already set,
-  // for example for a TLS inspection proxy.
+  // Codex uses CODEX_CA_CERTIFICATE before SSL_CERT_FILE, and it holds one
+  // bundle. Keep a CA that the user already set, for example for TLS inspection.
   const ca = file('ca.pem');
-  const existing = process.env.CODEX_CA_CERTIFICATE;
+  const existing = process.env.CODEX_CA_CERTIFICATE || process.env.SSL_CERT_FILE;
   if (existing) writeFileSync(ca, `${readFileSync(existing, 'utf8').trimEnd()}\n${readFileSync(ca, 'utf8')}`, { mode: 0o600 });
   return { ca, key: file('leaf-key.pem'), cert: file('leaf.pem') };
 }
