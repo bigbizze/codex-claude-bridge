@@ -113,7 +113,7 @@ test('provider activity extends the timeout beyond the total request duration', 
 test('client heartbeats do not keep a stalled provider alive', async t => {
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
   const finished = inMemoryRequest(t, async function* (_model, _context, { signal }) {
-    yield { type: 'start', partial: assistant([]) };
+    yield { type: 'text_start', contentIndex: 0, partial: assistant([{ type: 'text', text: '' }]) };
     await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
     yield { type: 'error', error: { errorMessage: 'aborted' } };
   }, 40000);
@@ -333,15 +333,20 @@ test('custom calls and signed reasoning survive a complete response and replay',
   assert.equal(replay.context.messages[1].role, 'toolResult');
 });
 
-test('disconnect cancels provider work', async t => {
-  let canceled;
+test('disconnect before the first output cancels provider work', async t => {
+  let canceled, started;
   const signalSeen = new Promise(resolve => { canceled = resolve; });
+  const providerStarted = new Promise(resolve => { started = resolve; });
   const { request } = await start(t, async function* (_model, _context, options) {
     yield { type: 'start', partial: assistant([]) };
+    started();
     await new Promise(resolve => options.signal.addEventListener('abort', () => { canceled(); resolve(); }, { once: true }));
   });
-  const response = await request({ stream: true });
-  await response.body.cancel();
+  const client = new AbortController();
+  const response = request({ stream: true }, { signal: client.signal }).catch(() => {});
+  await providerStarted;
+  client.abort();
+  await response;
   await Promise.race([signalSeen, new Promise((_, reject) => setTimeout(() => reject(new Error('No cancellation')), 1500).unref())]);
 });
 
@@ -453,5 +458,52 @@ test('the last text of a stopped response is a final answer, with or without str
     const data = events(await (await request({ stream: true })).text());
     assert.equal(data.find(event => event.type === 'response.output_item.done').item.phase, 'final_answer');
     assert.equal(data.at(-1).response.output[0].phase, 'final_answer');
+  }
+});
+
+test('a Claude usage limit before output holds the response without headers, then retries', async t => {
+  const resetsAt = Date.now() + 40;
+  const usageReader = { claude: async () => ({ windows: [{ usedPercent: 100, resetsAt }] }) };
+  let calls = 0;
+  const bridge = createBridge({ token: 'test-token', codec, usageReader, limitStepMs: 5,
+    limitPolicy: { anthropic: true, maxWaitMs: 60000, marginMs: 0, maxCycles: 3 },
+    registry: { getAvailable: () => [model], async *streamSimple() {
+      if (++calls === 1) { yield { type: 'error', error: { errorMessage: '429 rate_limit_error' } }; return; }
+      yield { type: 'done', reason: 'stop', message: assistant([{ type: 'text', text: 'after reset' }]) };
+    } } });
+  bridge.server.listen(0, '127.0.0.1'); await once(bridge.server, 'listening');
+  t.after(() => bridge.close());
+  const response = await fetch(`http://127.0.0.1:${bridge.server.address().port}/v1/responses`, { method: 'POST',
+    headers: { authorization: 'Bearer test-token' }, body: JSON.stringify({ model: modelId, input: 'Hi', stream: true }) });
+  assert.ok(Date.now() >= resetsAt, 'response headers arrived before the reset');
+  const data = events(await response.text());
+  assert.equal(calls, 2);
+  assert.equal(data.filter(event => event.type === 'response.created').length, 1);
+  assert.equal(data.at(-1).response.output[0].content[0].text, 'after reset');
+});
+
+test('an OpenAI usage limit waits only when enabled and otherwise reaches Codex unchanged', async t => {
+  const limit = JSON.stringify({ error: { type: 'usage_limit_reached', message: 'limit', resets_at: Math.floor(Date.now() / 1000) } });
+  for (const enabled of [true, false]) {
+    let calls = 0;
+    const bridge = createBridge({ token: 'test-token', codec, registry: { getAvailable: () => [] }, limitStepMs: 5,
+      limitPolicy: { openai: enabled, maxWaitMs: 60000, marginMs: 0, maxCycles: 3 },
+      openai: { catalog: { models: [{ slug: 'gpt-6-astra' }] }, fetchImpl: async () => ++calls === 1
+        ? new Response(limit, { status: 429, headers: { 'content-type': 'application/json', 'x-codex-primary-used-percent': '100' } })
+        : new Response('event: response.completed\ndata: {}\n\n', { headers: { 'content-type': 'text/event-stream', 'x-codex-turn-state': 'turn' } }) } });
+    bridge.server.listen(0, '127.0.0.1'); await once(bridge.server, 'listening');
+    t.after(() => bridge.close());
+    const response = await fetch(`http://127.0.0.1:${bridge.server.address().port}/v1/responses`, { method: 'POST',
+      headers: { 'x-codex-bridge-token': 'test-token', authorization: 'Bearer native' }, body: JSON.stringify({ model: 'gpt-6-astra', input: 'Hi' }) });
+    if (enabled) {
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get('x-codex-turn-state'), 'turn');
+      assert.equal(calls, 2);
+    } else {
+      assert.equal(response.status, 429);
+      assert.equal(response.headers.get('x-codex-primary-used-percent'), '100');
+      assert.equal(await response.text(), limit);
+      assert.equal(calls, 1);
+    }
   }
 });

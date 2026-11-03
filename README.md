@@ -9,6 +9,7 @@ Defaults: `anthropic/claude-opus-5-5`, medium reasoning effort.
 
 Requirements: Node.js 22 or newer, the `codex` and `pi` CLIs on `PATH`, and
 Anthropic access configured in Pi, and OpenAI access configured with `codex login`.
+`openssl` is optional. It is necessary only to show Claude limits in `/status`.
 The combined model picker and routing are tested with Codex 0.163.0 and Pi 0.87.1.
 
 Install those CLI versions if they are not already available:
@@ -214,6 +215,63 @@ The launcher generates a Codex model catalog using Pi's model names, input modal
 
 Thinking blocks and provider signatures are encrypted into Responses reasoning items so tool loops can continue after a restart. The encryption key is stored at `${XDG_STATE_HOME:-~/.local/state}/codex-claude-bridge/reasoning.key` with mode 0600. Keep this key if you need to resume bridge sessions. Pi OAuth credentials remain in Pi's own auth store.
 
+## Usage limits
+
+`/status` shows your Claude subscription limits (5-hour and weekly) below the
+ChatGPT limits. Codex reads limits only from its ChatGPT backend, and it
+requires HTTPS for that backend. So each launch does these steps:
+
+1. It creates a CA and a `localhost` certificate with `openssl`, valid for 30
+   days, in the temporary run folder. It deletes the CA private key after it
+   signs the certificate, so the CA cannot sign other certificates.
+2. Pi serves a loopback HTTPS proxy. The proxy sends every request to
+   `https://chatgpt.com` without changes. In the `/wham/usage` response, it
+   adds one `claude` entry from Anthropic's usage endpoint (cached for 60 s).
+3. Codex starts with `chatgpt_base_url` set to the proxy and
+   `CODEX_CA_CERTIFICATE` set to the CA. This adds one trusted CA for that
+   Codex process only. The system certificates stay trusted. If you already set
+   `CODEX_CA_CERTIFICATE` or `SSL_CERT_FILE`, the bridge adds its CA to a copy
+   of that file. The proxy accepts only requests whose path starts with a
+   per-launch secret. This secret is in the Codex command line, so it is not
+   the bridge token. The proxy adds no credentials, so a user who can read the
+   secret can see only your Claude usage. If you use TLS inspection, set `NODE_EXTRA_CA_CERTS`
+   for the bridge so the proxy can reach `chatgpt.com`.
+
+If `openssl` is missing or the Claude usage request fails, `/status` shows the
+ChatGPT limits only. Set `CODEX_BRIDGE_STATUS=0` to turn this off. Claude
+limits do not appear in the status line or in `/usage` analytics.
+
+When a model reaches its usage limit before it sends any output, the bridge
+can wait until the limit resets and then send the same request again. Codex
+shows `Working` during the wait, and the turn continues after the reset. The
+bridge gets the reset time from the provider usage endpoint (for OpenAI, first
+from the error). It waits for the latest reset of the full windows that apply
+to the model, for example the 5-hour, weekly and model-specific weekly limits. It waits in steps of 1 minute against the wall clock, so it
+also works after the computer sleeps. Press Esc to stop the wait. Set
+`CODEX_PI_DEBUG=1` to see the reason and the reset time in the bridge log.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `CODEX_BRIDGE_WAIT_CLAUDE` | on | Set to `0` to fail Claude limit errors at once. |
+| `CODEX_BRIDGE_WAIT_OPENAI` | off | Set to `1` to wait for OpenAI limits. When on, Codex cannot offer its own limit options, such as a model switch, for that request. |
+| `CODEX_BRIDGE_WAIT_MAX` | `6h` | Longest wait, for example `90m` or `2h`. A number without a unit is minutes. A later reset fails at once. An invalid value uses `6h` and causes a warning. |
+
+The bridge waits at most 3 times for one request, so one request can wait
+for up to 3 times `CODEX_BRIDGE_WAIT_MAX`. A limit error after output
+has started fails the turn as before.
+
+Both usage endpoints are undocumented, so a provider can change them. If that
+occurs, nothing else stops: `/status` shows the ChatGPT limits only, and a
+limit error is returned at once instead of a wait. The bridge records each
+changed format, removed endpoint or proxy certificate failure, and prints the
+list after Codex exits under `codex-claude-bridge warnings`. Network failures
+and temporary server errors are not in this list.
+
+`codex-claude --check` also reads the Claude usage endpoint and the ChatGPT
+limits through the `/status` proxy. It makes no model request, so it uses no
+usage. It exits with an error if a format changed or if Codex does not show the
+Claude row.
+
 ## Supported and unsupported operations
 
 Supported: text, base64 images, developer instructions, streamed output, namespace/function/custom tools (including apply_patch), tool results, reasoning effort, reasoning signature replay, cache-aware token usage, cancellation, and full-history resume.
@@ -223,7 +281,7 @@ Claude receives readable tool names: `functions` tools keep their names, other n
 For Claude, unsupported requests fail explicitly: provider-hosted tools, remote image URLs, input files, Responses compaction items, background Responses jobs, previous_response_id continuation, and forced tool selection. Codex's native web search stays disabled for mixed sessions so their histories can return to Claude. Local/MCP tools can still run through Codex. Claude custom grammar tools are adapted to a JSON string argument; the provider does not enforce the original grammar.
 
 The request limit is 16 MiB. Model requests time out after 10 minutes without
-provider activity. Each provider event resets this timer; local SSE heartbeats
+provider activity. A usage-limit wait does not count toward this timeout. Each provider event resets this timer; local SSE heartbeats
 do not. An active response can run longer than 10 minutes. Network errors and
 interrupted/incomplete responses remain errors. A simple successful prompt does
 not establish compatibility with every Codex feature.
@@ -280,6 +338,8 @@ Validated with Codex 0.156.1, Pi 0.87.1, and Node 24.21.0. The earlier Codex 0.1
 | Change | What to check |
 | --- | --- |
 | Codex upgrade | Run `codex-claude --check`, then a small tool call. Responses events, tool schemas, catalog fields, and the generic coding prompt can change. |
+| Codex features that use the ChatGPT backend fail | Set `CODEX_BRIDGE_STATUS=0` to remove the `/status` proxy, then run `codex-claude --check`. |
+| `codex-claude-bridge warnings` after exit | Each line gives the cause and the fix. A changed format means a provider changed a usage endpoint: Claude limits in `/status` and limit waits stay off until the bridge is updated. Other features work. |
 | Pi upgrade | Run `codex-claude --check`. The extension API, model catalog, and authentication transport can change. |
 | Claude access error | Run `pi auth check --provider anthropic`; use `/login anthropic` in Pi if needed. Subscription limits and model availability still apply. |
 | OpenAI access error | Run `codex login`, then restart the bridge. OpenAI access uses Codex credentials, not Pi credentials. |

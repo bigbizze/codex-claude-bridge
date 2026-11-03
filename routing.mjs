@@ -16,13 +16,18 @@ export async function forwardOpenAI({ request, headers, response, signal, onActi
     method: 'POST', headers: forwarded, body: JSON.stringify(openaiRequest(request)), signal, redirect: 'error',
   });
   onActivity();
-  if (result.status === 429 && onRateLimit && await onRateLimit()) {
-    await result.body?.cancel();
-    return false;
-  }
   const responseHeaders = {};
   for (const [name, value] of result.headers) {
     if (['content-type', 'cache-control', 'retry-after', 'www-authenticate', 'x-request-id'].includes(name) || name.startsWith('x-codex-') || name.startsWith('x-ratelimit-')) responseHeaders[name] = value;
+  }
+  // The 429 body is small JSON. Read it once so the handler can find the reset
+  // time and Codex still gets the original body when there is no retry.
+  if (result.status === 429 && onRateLimit) {
+    const body = await result.text();
+    if (await onRateLimit({ body, headers: result.headers })) return false;
+    response.writeHead(result.status, responseHeaders);
+    response.end(body);
+    return;
   }
   response.writeHead(result.status, responseHeaders);
   if (result.body) {

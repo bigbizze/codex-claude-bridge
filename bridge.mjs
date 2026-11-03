@@ -5,6 +5,7 @@ import { forwardOpenAI } from './routing.mjs';
 import { mergeCatalogs } from './model-catalog.mjs';
 import { fromResponses, toAnthropic } from './history.mjs';
 import { previousModelCompaction, createSelectedModelReader } from './compaction.mjs';
+import { createLimitWait, isRateLimitError, claudeResetAt, openaiResetAt } from './limits.mjs';
 
 export class RequestError extends Error {
   constructor(message, status = 400) { super(message); this.status = status; }
@@ -173,7 +174,7 @@ function outputItem(block, id, custom, toolMap, codec, model, final, showReasoni
 
 function json(res, status, body) { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); }
 
-export function createBridge({ registry, token, codec, requestTimeoutMs = 600000, openai, selectedModel = createSelectedModelReader() }) {
+export function createBridge({ registry, token, codec, requestTimeoutMs = 600000, openai, selectedModel = createSelectedModelReader(), usageReader, limitPolicy = {}, limitStepMs }) {
   const expected = Buffer.from(token);
   const controllers = new Set();
   const server = http.createServer(async (req, res) => {
@@ -182,6 +183,7 @@ export function createBridge({ registry, token, codec, requestTimeoutMs = 600000
     const path = new URL(req.url, 'http://localhost').pathname;
     const models = () => registry.getAvailable().filter(model => model.provider === 'anthropic');
     if (req.method === 'GET' && path === '/health') return json(res, 200, { service: 'codex-claude-bridge', version: 2 });
+    if (req.method === 'GET' && path === '/usage') return json(res, 200, { claude: await usageReader?.claude({ fresh: true }).catch(() => undefined) ?? null });
     if (req.method === 'GET' && path === '/v1/models') return json(res, 200, mergeCatalogs(catalog(models()), openai?.catalog || { models: [] }));
     if (req.method !== 'POST' || path !== '/v1/responses') return json(res, 404, { error: { message: 'Unsupported endpoint.' } });
     const controller = new AbortController();
@@ -194,6 +196,8 @@ export function createBridge({ registry, token, codec, requestTimeoutMs = 600000
       timer = setTimeout(() => controller.abort(new Error('Provider idle timeout: no model activity for ' + requestTimeoutMs / 1000 + ' seconds.')), requestTimeoutMs);
     };
     resetIdleTimeout();
+    const waitForLimit = createLimitWait({ policy: limitPolicy, signal: controller.signal, stepMs: limitStepMs,
+      pauseIdle: () => clearTimeout(timer), resumeIdle: resetIdleTimeout });
     const abort = () => { if (!res.writableEnded) controller.abort(new Error('Client disconnected.')); };
     req.on('aborted', abort); res.on('close', abort);
     let heartbeat;
@@ -227,7 +231,9 @@ export function createBridge({ registry, token, codec, requestTimeoutMs = 600000
       for (;;) {
         if (openai?.catalog.models.some(entry => entry.slug === request.model?.replace(/^openai\//, ''))) {
           if (!req.headers['x-codex-bridge-token'] || req.headers.authorization === `Bearer ${token}`) throw new RequestError('OpenAI requests require Codex authentication and the bridge token.', 401);
-          const forwarded = await forwardOpenAI({ request, headers: req.headers, response: res, signal: controller.signal, onActivity: resetIdleTimeout, onRateLimit: fallback, ...openai });
+          const onRateLimit = async ({ body, headers }) => await fallback() || await waitForLimit({ provider: 'openai', label: request.model,
+            resetAt: () => openaiResetAt({ usage: usageReader, body, headers, requestHeaders: req.headers }) });
+          const forwarded = await forwardOpenAI({ request, headers: req.headers, response: res, signal: controller.signal, onActivity: resetIdleTimeout, onRateLimit, ...openai });
           if (forwarded === false) continue;
           return;
         }
@@ -251,9 +257,10 @@ export function createBridge({ registry, token, codec, requestTimeoutMs = 600000
             catch (error) { controller.abort(error); }
           }, 15000);
         };
-        // Keep the response uncommitted until the compactor produces content so a
-        // pre-stream 429 can be replaced by exactly one destination-model response.
-        if (!compaction) startStream();
+        // Keep the response uncommitted until the model produces content. Then a
+        // 429 before output can be replaced by one compaction fallback response, or
+        // held until the usage limit resets. Codex waits for response headers with
+        // no timeout, so the hold sends nothing.
         const blocks = new Map();
         const start = (index, block) => {
           if (blocks.has(index)) return blocks.get(index);
@@ -345,7 +352,8 @@ export function createBridge({ registry, token, codec, requestTimeoutMs = 600000
           }
           if (!complete) throw new Error('Provider stream ended without a completion event.');
         } catch (error) {
-          if (!blocks.size && /\b429\b|rate_limit_error|rate.limit.exceeded/i.test(error.message) && await fallback()) continue;
+          if (!blocks.size && isRateLimitError(error.message) && (await fallback() || await waitForLimit({ provider: 'anthropic', label: request.model,
+            resetAt: () => claudeResetAt({ usage: usageReader, error, model: request.model }) }))) continue;
           startStream();
           throw error;
         }
