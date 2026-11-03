@@ -22,7 +22,8 @@ export function parseClaudeUsage(data) {
       return scope && window(`${limit.kind}:${scope}`, limit.percent, undefined, timeMs(limit.resets_at), { model: scope });
     }),
   ].filter(Boolean);
-  return { provider: 'anthropic', windows };
+  // A subscription always has a 5-hour or weekly limit, so no window means the format changed.
+  return windows.length ? { provider: 'anthropic', windows } : undefined;
 }
 
 export function parseOpenAIUsage(data) {
@@ -60,13 +61,25 @@ export function codexRateLimit(usage, now = Date.now()) {
     rate_limit: { allowed: !limitReached, limit_reached: limitReached, primary_window: codexWindow('five_hour'), secondary_window: codexWindow('seven_day') } };
 }
 
-export function createUsage({ claudeToken, fetchImpl = fetch, ttlMs = 60000, timeoutMs = 5000, now = Date.now, log = () => {} } = {}) {
-  const get = async (url, headers, parse) => {
+const updateHint = 'Claude limits in /status and Claude limit waits are off until the bridge is updated.';
+
+// A network failure is temporary. A changed format or a moved endpoint stays
+// until the bridge is updated, so it goes to `warn`.
+export function createUsage({ claudeToken, fetchImpl = fetch, ttlMs = 60000, timeoutMs = 5000, now = Date.now, log = () => {}, warn = () => {} } = {}) {
+  const get = async (url, headers, parse, name, effect) => {
+    let response;
     try {
-      const response = await fetchImpl(url, { headers, redirect: 'error', signal: AbortSignal.timeout(timeoutMs) });
-      if (!response.ok) { log(`usage request failed: ${new URL(url).host} ${response.status}`); return undefined; }
-      return parse(await response.json());
+      response = await fetchImpl(url, { headers, redirect: 'error', signal: AbortSignal.timeout(timeoutMs) });
     } catch (error) { log(`usage request failed: ${new URL(url).host} ${error.message}`); return undefined; }
+    if (!response.ok) {
+      if (response.status >= 400 && response.status < 500 && response.status !== 429) warn(`${name} usage endpoint returned HTTP ${response.status}. ${effect}`);
+      else log(`usage request failed: ${new URL(url).host} ${response.status}`);
+      return undefined;
+    }
+    let parsed;
+    try { parsed = parse(await response.json()); } catch {}
+    if (!parsed) warn(`${name} usage format changed. ${effect}`);
+    return parsed;
   };
   let claudeCache;
   return {
@@ -77,8 +90,10 @@ export function createUsage({ claudeToken, fetchImpl = fetch, ttlMs = 60000, tim
       if (!fresh && claudeCache && now() - claudeCache.at < ttlMs) return claudeCache.value;
       const value = (async () => {
         const token = await claudeToken().catch(() => undefined);
-        if (!token) return undefined;
-        const usage = await get('https://api.anthropic.com/api/oauth/usage', { authorization: `Bearer ${token}`, 'anthropic-beta': 'oauth-2025-04-20' }, parseClaudeUsage);
+        // API keys have no subscription usage.
+        if (!token || token.startsWith('sk-ant-api')) return undefined;
+        const usage = await get('https://api.anthropic.com/api/oauth/usage', { authorization: `Bearer ${token}`, 'anthropic-beta': 'oauth-2025-04-20' },
+          parseClaudeUsage, 'Claude', updateHint);
         if (!usage && claudeCache?.value === value) claudeCache = undefined;
         return usage;
       })();
@@ -91,7 +106,8 @@ export function createUsage({ claudeToken, fetchImpl = fetch, ttlMs = 60000, tim
       if (typeof requestHeaders.authorization !== 'string' || typeof requestHeaders['chatgpt-account-id'] !== 'string') return Promise.resolve(undefined);
       const headers = { authorization: requestHeaders.authorization, 'chatgpt-account-id': requestHeaders['chatgpt-account-id'] };
       for (const name of ['originator', 'user-agent']) if (typeof requestHeaders[name] === 'string') headers[name] = requestHeaders[name];
-      return get(`${baseUrl}/wham/usage`, headers, parseOpenAIUsage);
+      return get(`${baseUrl}/wham/usage`, headers, parseOpenAIUsage, 'ChatGPT',
+        'OpenAI limit waits use only the reset time in the limit error until the bridge is updated.');
     },
   };
 }

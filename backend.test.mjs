@@ -30,11 +30,13 @@ test('the proxy needs the secret, forwards only to the fixed origin, and keeps C
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const files = await createLocalCertificates(dir);
   const calls = [];
+  const warnings = [];
+  let usageBody = chatgpt;
   const backend = createBackend({ key: readFileSync(files.key), cert: readFileSync(files.cert), secret: 'secret',
-    usageReader: { claude: async () => { throw new Error('offline'); } },
+    usageReader: { claude: async () => { throw new Error('offline'); } }, warn: message => warnings.push(message),
     fetchImpl: async (url, options) => {
       calls.push({ url: String(url), headers: options.headers });
-      return url.pathname.endsWith('/wham/usage') ? Response.json(chatgpt) : new Response('plain', { headers: { 'content-type': 'text/plain' } });
+      return url.pathname.endsWith('/wham/usage') ? Response.json(usageBody) : new Response('plain', { headers: { 'content-type': 'text/plain' } });
     } });
   backend.listen(0, '127.0.0.1'); await once(backend, 'listening');
   t.after(() => backend.close());
@@ -54,4 +56,9 @@ test('the proxy needs the secret, forwards only to the fixed origin, and keeps C
   assert.deepEqual(calls.map(call => call.url), ['https://chatgpt.com/backend-api/wham/usage', 'https://chatgpt.com/backend-api/plugins']);
   assert.equal(calls[0].headers.get('authorization'), 'Bearer chatgpt');
   assert.equal(calls[0].headers.has('host'), false);
+  // A changed ChatGPT usage format passes through unchanged and causes a warning.
+  assert.deepEqual(warnings, []);
+  usageBody = { limits: { codex: 19 } };
+  assert.deepEqual(JSON.parse((await get('/secret/backend-api/wham/usage')).body), usageBody);
+  assert.match(warnings.at(-1), /^ChatGPT usage format changed/);
 });

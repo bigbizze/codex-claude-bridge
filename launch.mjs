@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createHandoff, parseSwitch } from './handoff.mjs';
 import { createLocalCertificates } from './certs.mjs';
+import { AppServer } from './app-server.mjs';
+import { readWarnings } from './warnings.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const model = process.env.CODEX_CLAUDE_MODEL || 'anthropic/claude-opus-5-5';
@@ -15,6 +17,7 @@ let runtimeDir;
 let codex;
 let closing;
 let handoffClient;
+let warningsFile;
 
 function child(command, args, options) {
   const process = spawn(command, args, options);
@@ -44,7 +47,10 @@ async function cleanup() {
   })();
   return closing;
 }
-process.on('SIGTERM', () => { cleanup().then(() => process.exit(143)); });
+function printWarnings(warnings) {
+  if (warnings.length) console.error(`codex-claude-bridge warnings:\n${warnings.map(line => `  - ${line}`).join('\n')}`);
+}
+process.on('SIGTERM', () => { const warnings = readWarnings(warningsFile); cleanup().then(() => { printWarnings(warnings); process.exit(143); }); });
 process.on('SIGINT', () => { if (!codex) cleanup().then(() => process.exit(130)); });
 
 async function main() {
@@ -94,7 +100,9 @@ async function main() {
   writeFileSync(openaiCatalogFile, JSON.stringify(openaiCatalog), { mode: 0o600 });
   const token = randomBytes(32).toString('hex');
   const readyFile = join(runtimeDir, 'ready.json');
-  const env = { ...process.env, CODEX_PI_BRIDGE_TOKEN: token, CODEX_PI_STATE_KEY_FILE: keyFile, CODEX_PI_READY_FILE: readyFile, CODEX_PI_OPENAI_CATALOG: openaiCatalogFile };
+  warningsFile = join(runtimeDir, 'warnings.log');
+  const env = { ...process.env, CODEX_PI_BRIDGE_TOKEN: token, CODEX_PI_STATE_KEY_FILE: keyFile, CODEX_PI_READY_FILE: readyFile, CODEX_PI_OPENAI_CATALOG: openaiCatalogFile,
+    CODEX_PI_WARNINGS_FILE: warningsFile };
   // Claude limits in /status need a local HTTPS ChatGPT backend. Without openssl
   // the bridge still works, and /status shows ChatGPT limits only.
   let certificates;
@@ -153,7 +161,7 @@ async function main() {
     const missing = openaiCatalog.models.filter(item => !(Array.isArray(parsed) ? parsed : parsed.models).some(loaded => loaded.slug === `openai/${item.slug}`));
     if (missing.length) throw new Error(`Codex did not load OpenAI models: ${missing.map(item => item.slug).join(', ')}`);
     console.log(`Ready: ${model}; medium effort; context ${entry.context_window}; ${openaiCatalog.models.length} OpenAI models; authenticated loopback proxy.`);
-    return 0;
+    return await checkUsage(ready, token, config.slice(0, -2), env) ? 0 : 1;
   }
   const clientArgs = switching ? await handoff([...config.slice(0, -2), '-c', `model=${JSON.stringify(model)}`], env) : userArgs;
   codex = child('codex', [...config, ...clientArgs], { env, stdio: 'inherit' });
@@ -161,6 +169,35 @@ async function main() {
   pi.result.then(() => { if (!closing && codex.process.exitCode === null) codex.process.kill('SIGTERM'); });
   return codex.result;
 }
+
+// Reads usage only. It makes no model request, so it uses no model quota.
+async function checkUsage(ready, token, config, env) {
+  const percent = window => window ? `${Math.round(window.usedPercent)}%` : 'none';
+  const usage = await fetch(`http://127.0.0.1:${ready.port}/usage`, { headers: { authorization: `Bearer ${token}` } }).then(response => response.json());
+  const claude = usage.claude?.windows ?? [];
+  console.log(usage.claude
+    ? `Claude usage: OK; 5-hour ${percent(claude.find(item => item.id === 'five_hour'))}, weekly ${percent(claude.find(item => item.id === 'seven_day'))}.`
+    : 'Claude usage: unavailable.');
+  if (!ready.backendPort) console.log('/status proxy: off (CODEX_BRIDGE_STATUS=0 or no openssl).');
+  else {
+    const client = new AppServer(config, { env });
+    try {
+      await client.initialize();
+      const limits = await client.call('account/rateLimits/read');
+      const shown = Object.entries(limits.rateLimitsByLimitId ?? {}).some(([id, item]) => id === 'claude' || item?.limitName === 'Claude');
+      if (shown || !usage.claude) console.log(`/status proxy: OK; ChatGPT limits read${shown ? '; Claude row shown' : ''}.`);
+      else { console.log('/status proxy: Codex did not read the Claude row. Codex changed how it reads limits; the bridge needs an update.'); return false; }
+    } catch (error) {
+      console.log(`/status proxy: ChatGPT limits not read (${error.message}). API-key accounts have no ChatGPT limits.`);
+    } finally { await client.close(); }
+  }
+  return readWarnings(warningsFile).length === 0;
+}
+
 try { process.exitCode = await main(); }
 catch (error) { console.error(error.message); process.exitCode = 1; }
-finally { await cleanup(); }
+finally {
+  const warnings = readWarnings(warningsFile);
+  await cleanup();
+  printWarnings(warnings);
+}

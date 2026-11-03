@@ -73,9 +73,19 @@ test('usage requests fail closed and share one cached Claude request', async () 
   assert.equal(calls, 1);
   await reader.claude({ fresh: true });
   assert.equal(calls, 2);
-  const failing = createUsage({ claudeToken: async () => 'token', fetchImpl: async () => new Response('no', { status: 500 }) });
+  const warnings = [];
+  const warn = message => warnings.push(message);
+  const failing = createUsage({ claudeToken: async () => 'token', warn, fetchImpl: async () => new Response('no', { status: 500 }) });
   assert.equal(await failing.claude(), undefined);
-  const throwing = createUsage({ claudeToken: async () => 'token', fetchImpl: async () => { throw new Error('offline'); } });
+  const throwing = createUsage({ claudeToken: async () => 'token', warn, fetchImpl: async () => { throw new Error('offline'); } });
   assert.equal(await throwing.claude(), undefined);
   assert.equal(await throwing.openai({ authorization: 'Bearer api-key' }), undefined);
+  // Temporary failures are not warnings. A changed format or a removed endpoint is.
+  assert.deepEqual(warnings, []);
+  for (const body of [{ usage: { five_hour: 41 } }, { five_hour: { used: 41 }, seven_day: null }]) {
+    assert.equal(await createUsage({ claudeToken: async () => 'token', warn, fetchImpl: async () => Response.json(body) }).claude(), undefined);
+  }
+  await createUsage({ claudeToken: async () => 'token', warn, fetchImpl: async () => new Response('gone', { status: 404 }) }).claude();
+  await createUsage({ warn, fetchImpl: async () => Response.json({ limits: [] }) }).openai({ authorization: 'Bearer chatgpt', 'chatgpt-account-id': 'account' });
+  assert.deepEqual(warnings.map(line => line.split('.')[0]), ['Claude usage format changed', 'Claude usage format changed', 'Claude usage endpoint returned HTTP 404', 'ChatGPT usage format changed']);
 });

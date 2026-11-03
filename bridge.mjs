@@ -183,6 +183,7 @@ export function createBridge({ registry, token, codec, requestTimeoutMs = 600000
     const path = new URL(req.url, 'http://localhost').pathname;
     const models = () => registry.getAvailable().filter(model => model.provider === 'anthropic');
     if (req.method === 'GET' && path === '/health') return json(res, 200, { service: 'codex-claude-bridge', version: 2 });
+    if (req.method === 'GET' && path === '/usage') return json(res, 200, { claude: await usageReader?.claude({ fresh: true }) ?? null });
     if (req.method === 'GET' && path === '/v1/models') return json(res, 200, mergeCatalogs(catalog(models()), openai?.catalog || { models: [] }));
     if (req.method !== 'POST' || path !== '/v1/responses') return json(res, 404, { error: { message: 'Unsupported endpoint.' } });
     const controller = new AbortController();

@@ -20,7 +20,12 @@ export function mergeUsage(body, claude, now = Date.now()) {
 // first path segment of chatgpt_base_url. Other local users cannot use the proxy.
 const unprefixed = (path, secret) => path.startsWith(`/${secret}/`) ? path.slice(secret.length + 1) : undefined;
 
-export function createBackend({ key, cert, secret, usageReader, fetchImpl = fetch, origin = `https://${ORIGIN}`, log = () => {} }) {
+// Certificate errors stay until the user acts, for example after TLS inspection
+// starts. Other connection errors are usually temporary network failures.
+const certificateError = error => /CERT|SIGNATURE|ISSUER/.test(error?.cause?.code ?? error?.code ?? '');
+const proxyHint = 'Set NODE_EXTRA_CA_CERTS for TLS inspection, or set CODEX_BRIDGE_STATUS=0.';
+
+export function createBackend({ key, cert, secret, usageReader, fetchImpl = fetch, origin = `https://${ORIGIN}`, log = () => {}, warn = log }) {
   const server = https.createServer({ key, cert }, async (req, res) => {
     const controller = new AbortController();
     res.on('close', () => { if (!res.writableEnded) controller.abort(); });
@@ -48,7 +53,10 @@ export function createBackend({ key, cert, secret, usageReader, fetchImpl = fetc
       if (usage && upstream.status === 200 && /json/.test(upstream.headers.get('content-type') ?? '')) {
         const text = await upstream.text();
         let body = text;
-        try { body = JSON.stringify(mergeUsage(JSON.parse(text), claude)); } catch {}
+        let parsed;
+        try { parsed = JSON.parse(text); } catch {}
+        if (!parsed || typeof parsed !== 'object' || !('rate_limit' in parsed)) warn('ChatGPT usage format changed. Claude limits are not shown in /status until the bridge is updated.');
+        else body = JSON.stringify(mergeUsage(parsed, claude));
         res.writeHead(upstream.status, responseHeaders);
         res.end(body);
         return;
@@ -58,7 +66,8 @@ export function createBackend({ key, cert, secret, usageReader, fetchImpl = fetc
       else res.end();
     } catch (error) {
       if (controller.signal.aborted) return;
-      log(`[pi-codex] backend request failed: ${error.message}`);
+      if (certificateError(error)) warn(`ChatGPT backend proxy cannot verify chatgpt.com (${error.cause?.code ?? error.code}). ${proxyHint}`);
+      else log(`backend request failed: ${error.message}`);
       if (!res.headersSent) { res.writeHead(502, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'ChatGPT backend proxy failed.' } })); }
       else res.destroy();
     }
@@ -77,7 +86,12 @@ export function createBackend({ key, cert, secret, usageReader, fetchImpl = fetc
       upstream.pipe(socket); socket.pipe(upstream);
     });
     const close = () => { upstream.destroy(); socket.destroy(); };
-    upstream.on('error', close); socket.on('error', close); upstream.on('close', close); socket.on('close', close);
+    upstream.on('error', error => {
+      if (certificateError(error)) warn(`ChatGPT backend proxy cannot verify chatgpt.com (${error.code}). ${proxyHint}`);
+      else log(`backend tunnel failed: ${error.message}`);
+      close();
+    });
+    socket.on('error', close); upstream.on('close', close); socket.on('close', close);
   });
   return server;
 }

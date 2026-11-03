@@ -258,6 +258,18 @@ The bridge waits at most 3 times for one request, so one request can wait
 for up to 3 times `CODEX_BRIDGE_WAIT_MAX`. A limit error after output
 has started fails the turn as before.
 
+Both usage endpoints are undocumented, so a provider can change them. If that
+occurs, nothing else stops: `/status` shows the ChatGPT limits only, and a
+limit error is returned at once instead of a wait. The bridge records each
+changed format, removed endpoint or proxy certificate failure, and prints the
+list after Codex exits under `codex-claude-bridge warnings`. Network failures
+and temporary server errors are not in this list.
+
+`codex-claude --check` also reads the Claude usage endpoint and the ChatGPT
+limits through the `/status` proxy. It makes no model request, so it uses no
+usage. It exits with an error if a format changed or if Codex does not show the
+Claude row.
+
 ## Supported and unsupported operations
 
 Supported: text, base64 images, developer instructions, streamed output, namespace/function/custom tools (including apply_patch), tool results, reasoning effort, reasoning signature replay, cache-aware token usage, cancellation, and full-history resume.
@@ -324,6 +336,8 @@ Validated with Codex 0.156.1, Pi 0.87.1, and Node 24.21.0. The earlier Codex 0.1
 | Change | What to check |
 | --- | --- |
 | Codex upgrade | Run `codex-claude --check`, then a small tool call. Responses events, tool schemas, catalog fields, and the generic coding prompt can change. |
+| Codex features that use the ChatGPT backend fail | Set `CODEX_BRIDGE_STATUS=0` to remove the `/status` proxy, then run `codex-claude --check`. |
+| `codex-claude-bridge warnings` after exit | Each line gives the cause and the fix. A changed format means a provider changed a usage endpoint: Claude limits in `/status` and limit waits stay off until the bridge is updated. Other features work. |
 | Pi upgrade | Run `codex-claude --check`. The extension API, model catalog, and authentication transport can change. |
 | Claude access error | Run `pi auth check --provider anthropic`; use `/login anthropic` in Pi if needed. Subscription limits and model availability still apply. |
 | OpenAI access error | Run `codex login`, then restart the bridge. OpenAI access uses Codex credentials, not Pi credentials. |

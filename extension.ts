@@ -4,6 +4,7 @@ import { mergeCatalogs } from './model-catalog.mjs';
 import { createUsage } from './usage.mjs';
 import { waitPolicy } from './limits.mjs';
 import { createBackend } from './backend.mjs';
+import { createWarnings } from './warnings.mjs';
 
 const listen = (server: any) => new Promise<void>((resolve, reject) => {
   server.once('error', reject);
@@ -20,13 +21,14 @@ export default function (pi: any) {
     const openaiCatalogFile = process.env.CODEX_PI_OPENAI_CATALOG;
     const openaiCatalog = openaiCatalogFile ? JSON.parse(readFileSync(openaiCatalogFile, 'utf8')) : { models: [] };
     const log = process.env.CODEX_PI_DEBUG ? (line: string) => console.error(`[pi-codex] ${line}`) : () => {};
-    const usageReader = createUsage({ claudeToken: () => ctx.modelRegistry.getApiKeyForProvider('anthropic'), log });
+    const warn = createWarnings(process.env.CODEX_PI_WARNINGS_FILE, log);
+    const usageReader = createUsage({ claudeToken: () => ctx.modelRegistry.getApiKeyForProvider('anthropic'), log, warn });
     bridge = createBridge({ registry: ctx.modelRegistry, token, codec: createCodec(readFileSync(keyFile)), usageReader, limitPolicy: waitPolicy(),
       openai: openaiCatalogFile ? { catalog: openaiCatalog } : undefined });
     await listen(bridge.server);
     let backendPort;
     if (process.env.CODEX_PI_TLS_KEY && process.env.CODEX_PI_TLS_CERT) {
-      backend = createBackend({ key: readFileSync(process.env.CODEX_PI_TLS_KEY), cert: readFileSync(process.env.CODEX_PI_TLS_CERT), secret: token, usageReader, log: console.error });
+      backend = createBackend({ key: readFileSync(process.env.CODEX_PI_TLS_KEY), cert: readFileSync(process.env.CODEX_PI_TLS_CERT), secret: token, usageReader, log, warn });
       await listen(backend);
       const address = backend.address();
       backendPort = typeof address === 'object' && address?.port;
