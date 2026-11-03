@@ -11,13 +11,14 @@ const ORIGIN = 'chatgpt.com';
 const hopByHop = new Set(['host', 'connection', 'keep-alive', 'proxy-connection', 'transfer-encoding', 'te', 'trailer', 'upgrade', 'content-length', 'accept-encoding', 'expect']);
 
 export function mergeUsage(body, claude, now = Date.now()) {
-  if (!claude || !body || typeof body !== 'object' || !body.rate_limit) return body;
+  if (!claude || !body || typeof body !== 'object' || !('rate_limit' in body)) return body;
   const others = (Array.isArray(body.additional_rate_limits) ? body.additional_rate_limits : []).filter(entry => entry?.metered_feature !== 'claude');
   return { ...body, additional_rate_limits: [...others, codexRateLimit(claude, now)] };
 }
 
-// Codex cannot send a header to its backend, so the per-launch secret is the
-// first path segment of chatgpt_base_url. Other local users cannot use the proxy.
+// Codex cannot send a header to its backend, so a per-launch secret is the first
+// path segment of chatgpt_base_url. It is visible in the process list. The proxy
+// adds no credentials, so a user who reads it can see only the Claude usage.
 const unprefixed = (path, secret) => path.startsWith(`/${secret}/`) ? path.slice(secret.length + 1) : undefined;
 
 // Certificate errors stay until the user acts, for example after TLS inspection

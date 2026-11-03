@@ -231,8 +231,10 @@ requires HTTPS for that backend. So each launch does these steps:
    `CODEX_CA_CERTIFICATE` set to the CA. This adds one trusted CA for that
    Codex process only. The system certificates stay trusted. If you already set
    `CODEX_CA_CERTIFICATE` or `SSL_CERT_FILE`, the bridge adds its CA to a copy
-   of that file. The proxy accepts only requests whose path starts with the
-   per-launch bridge token. If you use TLS inspection, set `NODE_EXTRA_CA_CERTS`
+   of that file. The proxy accepts only requests whose path starts with a
+   per-launch secret. This secret is in the Codex command line, so it is not
+   the bridge token. The proxy adds no credentials, so a user who can read the
+   secret can see only your Claude usage. If you use TLS inspection, set `NODE_EXTRA_CA_CERTS`
    for the bridge so the proxy can reach `chatgpt.com`.
 
 If `openssl` is missing or the Claude usage request fails, `/status` shows the
@@ -252,7 +254,7 @@ also works after the computer sleeps. Press Esc to stop the wait. Set
 | --- | --- | --- |
 | `CODEX_BRIDGE_WAIT_CLAUDE` | on | Set to `0` to fail Claude limit errors at once. |
 | `CODEX_BRIDGE_WAIT_OPENAI` | off | Set to `1` to wait for OpenAI limits. When on, Codex cannot offer its own limit options, such as a model switch, for that request. |
-| `CODEX_BRIDGE_WAIT_MAX` | `6h` | Longest wait, for example `90m` or `2h`. A later reset fails at once. |
+| `CODEX_BRIDGE_WAIT_MAX` | `6h` | Longest wait, for example `90m` or `2h`. A number without a unit is minutes. A later reset fails at once. An invalid value uses `6h` and causes a warning. |
 
 The bridge waits at most 3 times for one request, so one request can wait
 for up to 3 times `CODEX_BRIDGE_WAIT_MAX`. A limit error after output

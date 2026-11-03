@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { createBridge, createCodec, catalog } from './bridge.mjs';
 import { mergeCatalogs } from './model-catalog.mjs';
 import { createUsage } from './usage.mjs';
-import { waitPolicy } from './limits.mjs';
+import { waitPolicy, parseDuration } from './limits.mjs';
 import { createBackend } from './backend.mjs';
 import { createWarnings } from './warnings.mjs';
 
@@ -22,13 +22,17 @@ export default function (pi: any) {
     const openaiCatalog = openaiCatalogFile ? JSON.parse(readFileSync(openaiCatalogFile, 'utf8')) : { models: [] };
     const log = process.env.CODEX_PI_DEBUG ? (line: string) => console.error(`[pi-codex] ${line}`) : () => {};
     const warn = createWarnings(process.env.CODEX_PI_WARNINGS_FILE, log);
+    if (process.env.CODEX_BRIDGE_WAIT_MAX && parseDuration(process.env.CODEX_BRIDGE_WAIT_MAX) === undefined) {
+      warn(`CODEX_BRIDGE_WAIT_MAX="${process.env.CODEX_BRIDGE_WAIT_MAX}" is not valid, so the default of 6h was used. Use a number with s, m or h, for example 90m.`);
+    }
     const usageReader = createUsage({ claudeToken: () => ctx.modelRegistry.getApiKeyForProvider('anthropic'), log, warn });
     bridge = createBridge({ registry: ctx.modelRegistry, token, codec: createCodec(readFileSync(keyFile)), usageReader, limitPolicy: waitPolicy(),
       openai: openaiCatalogFile ? { catalog: openaiCatalog } : undefined });
     await listen(bridge.server);
     let backendPort;
-    if (process.env.CODEX_PI_TLS_KEY && process.env.CODEX_PI_TLS_CERT) {
-      backend = createBackend({ key: readFileSync(process.env.CODEX_PI_TLS_KEY), cert: readFileSync(process.env.CODEX_PI_TLS_CERT), secret: token, usageReader, log, warn });
+    if (process.env.CODEX_PI_TLS_KEY && process.env.CODEX_PI_TLS_CERT && process.env.CODEX_PI_BACKEND_SECRET) {
+      backend = createBackend({ key: readFileSync(process.env.CODEX_PI_TLS_KEY), cert: readFileSync(process.env.CODEX_PI_TLS_CERT),
+        secret: process.env.CODEX_PI_BACKEND_SECRET, usageReader, log, warn });
       await listen(backend);
       const address = backend.address();
       backendPort = typeof address === 'object' && address?.port;

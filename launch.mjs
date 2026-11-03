@@ -99,10 +99,13 @@ async function main() {
   const openaiCatalogFile = join(runtimeDir, 'openai-models.json');
   writeFileSync(openaiCatalogFile, JSON.stringify(openaiCatalog), { mode: 0o600 });
   const token = randomBytes(32).toString('hex');
+  // The proxy secret is in the Codex command line, which other local users can
+  // read, so it must not be the bridge token.
+  const backendSecret = randomBytes(32).toString('hex');
   const readyFile = join(runtimeDir, 'ready.json');
   warningsFile = join(runtimeDir, 'warnings.log');
   const env = { ...process.env, CODEX_PI_BRIDGE_TOKEN: token, CODEX_PI_STATE_KEY_FILE: keyFile, CODEX_PI_READY_FILE: readyFile, CODEX_PI_OPENAI_CATALOG: openaiCatalogFile,
-    CODEX_PI_WARNINGS_FILE: warningsFile };
+    CODEX_PI_WARNINGS_FILE: warningsFile, CODEX_PI_BACKEND_SECRET: backendSecret };
   // Claude limits in /status need a local HTTPS ChatGPT backend. Without openssl
   // the bridge still works, and /status shows ChatGPT limits only.
   let certificates;
@@ -129,8 +132,8 @@ async function main() {
   if (!ready.catalog.models.some(item => item.slug === model)) throw new Error(`${model} is unavailable. Run pi and /login anthropic.`);
   if (ready.backendPort) {
     env.CODEX_CA_CERTIFICATE = certificates.ca;
-    delete env.CODEX_PI_TLS_KEY; delete env.CODEX_PI_TLS_CERT;
   }
+  delete env.CODEX_PI_TLS_KEY; delete env.CODEX_PI_TLS_CERT; delete env.CODEX_PI_BACKEND_SECRET;
   const catalogFile = join(runtimeDir, 'models.json');
   writeFileSync(catalogFile, JSON.stringify(ready.catalog), { mode: 0o600 });
   const config = [
@@ -144,7 +147,7 @@ async function main() {
     '-c', `model_catalog_json=${JSON.stringify(catalogFile)}`,
     '-c', 'model_reasoning_effort="medium"',
     '-c', 'web_search="disabled"',
-    ...(ready.backendPort ? ['-c', `chatgpt_base_url="https://localhost:${ready.backendPort}/${token}/backend-api/"`] : []),
+    ...(ready.backendPort ? ['-c', `chatgpt_base_url="https://localhost:${ready.backendPort}/${backendSecret}/backend-api/"`] : []),
     '-m', model,
   ];
   if (userArgs.length === 1 && userArgs[0] === '--check') {
@@ -185,7 +188,7 @@ async function checkUsage(ready, token, config, env) {
       await client.initialize();
       const limits = await client.call('account/rateLimits/read');
       const shown = Object.entries(limits.rateLimitsByLimitId ?? {}).some(([id, item]) => id === 'claude' || item?.limitName === 'Claude');
-      if (shown || !usage.claude) console.log(`/status proxy: OK; ChatGPT limits read${shown ? '; Claude row shown' : ''}.`);
+      if (shown || !usage.claude?.windows.length) console.log(`/status proxy: OK; ChatGPT limits read${shown ? '; Claude row shown' : ''}.`);
       else { console.log('/status proxy: Codex did not read the Claude row. Codex changed how it reads limits; the bridge needs an update.'); return false; }
     } catch (error) {
       console.log(`/status proxy: ChatGPT limits not read (${error.message}). API-key accounts have no ChatGPT limits.`);

@@ -86,6 +86,15 @@ test('usage requests fail closed and share one cached Claude request', async () 
     assert.equal(await createUsage({ claudeToken: async () => 'token', warn, fetchImpl: async () => Response.json(body) }).claude(), undefined);
   }
   await createUsage({ claudeToken: async () => 'token', warn, fetchImpl: async () => new Response('gone', { status: 404 }) }).claude();
+  // A rejected login and inactive limits are not format changes.
+  await createUsage({ claudeToken: async () => 'token', warn, fetchImpl: async () => new Response('no', { status: 401 }) }).claude();
+  assert.deepEqual((await createUsage({ claudeToken: async () => 'token', warn, fetchImpl: async () => Response.json({ five_hour: null, seven_day: null }) }).claude()).windows, []);
   await createUsage({ warn, fetchImpl: async () => Response.json({ limits: [] }) }).openai({ authorization: 'Bearer chatgpt', 'chatgpt-account-id': 'account' });
   assert.deepEqual(warnings.map(line => line.split('.')[0]), ['Claude usage format changed', 'Claude usage format changed', 'Claude usage endpoint returned HTTP 404', 'ChatGPT usage format changed']);
+  // A failed fresh read during a limit wait uses the last good reading.
+  let up = true;
+  const flaky = createUsage({ claudeToken: async () => 'token', fetchImpl: async () => up ? Response.json(claude) : new Response('busy', { status: 429 }) });
+  const good = await flaky.claude();
+  up = false;
+  assert.equal(await flaky.claude({ fresh: true }), good);
 });

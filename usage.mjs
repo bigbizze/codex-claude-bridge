@@ -12,6 +12,9 @@ const words = value => String(value ?? '').toLowerCase().split(/[^a-z0-9]+/).fil
 
 export function parseClaudeUsage(data) {
   if (!data || typeof data !== 'object' || !('five_hour' in data || 'seven_day' in data)) return undefined;
+  // A null window is an inactive limit. A window in another shape is a format change.
+  const main = ['five_hour', 'seven_day'].map(name => data[name]);
+  if (main.some(item => item != null && !(typeof item.utilization === 'number'))) return undefined;
   const windows = [
     window('five_hour', data.five_hour?.utilization, 5 * HOUR, timeMs(data.five_hour?.resets_at)),
     window('seven_day', data.seven_day?.utilization, 7 * 24 * HOUR, timeMs(data.seven_day?.resets_at)),
@@ -22,12 +25,11 @@ export function parseClaudeUsage(data) {
       return scope && window(`${limit.kind}:${scope}`, limit.percent, undefined, timeMs(limit.resets_at), { model: scope });
     }),
   ].filter(Boolean);
-  // A subscription always has a 5-hour or weekly limit, so no window means the format changed.
-  return windows.length ? { provider: 'anthropic', windows } : undefined;
+  return { provider: 'anthropic', windows };
 }
 
 export function parseOpenAIUsage(data) {
-  if (!data || typeof data !== 'object' || !data.rate_limit) return undefined;
+  if (!data || typeof data !== 'object' || !('rate_limit' in data)) return undefined;
   const fromLimit = (prefix, limit) => ['primary_window', 'secondary_window'].map(name => limit?.[name] &&
     window(`${prefix}${name}`, limit[name].used_percent, limit[name].limit_window_seconds, timeMs(limit[name].reset_at)));
   // additional_rate_limits are other metered features, not Codex model requests.
@@ -64,15 +66,17 @@ export function codexRateLimit(usage, now = Date.now()) {
 const updateHint = 'Claude limits in /status and Claude limit waits are off until the bridge is updated.';
 
 // A network failure is temporary. A changed format or a moved endpoint stays
-// until the bridge is updated, so it goes to `warn`.
-export function createUsage({ claudeToken, fetchImpl = fetch, ttlMs = 60000, timeoutMs = 5000, now = Date.now, log = () => {}, warn = () => {} } = {}) {
+// until the bridge is updated, so it goes to `warn`. A rejected credential needs
+// a new login, not an update.
+export function createUsage({ claudeToken, fetchImpl = fetch, ttlMs = 60000, staleMs = 10 * 60000, timeoutMs = 5000, now = Date.now, log = () => {}, warn = () => {} } = {}) {
   const get = async (url, headers, parse, name, effect) => {
     let response;
     try {
       response = await fetchImpl(url, { headers, redirect: 'error', signal: AbortSignal.timeout(timeoutMs) });
     } catch (error) { log(`usage request failed: ${new URL(url).host} ${error.message}`); return undefined; }
     if (!response.ok) {
-      if (response.status >= 400 && response.status < 500 && response.status !== 429) warn(`${name} usage endpoint returned HTTP ${response.status}. ${effect}`);
+      if (response.status === 401 || response.status === 403) log(`usage request not authorized: ${new URL(url).host} ${response.status}`);
+      else if (response.status >= 400 && response.status < 500 && ![408, 429].includes(response.status)) warn(`${name} usage endpoint returned HTTP ${response.status}. ${effect}`);
       else log(`usage request failed: ${new URL(url).host} ${response.status}`);
       return undefined;
     }
@@ -82,23 +86,32 @@ export function createUsage({ claudeToken, fetchImpl = fetch, ttlMs = 60000, tim
     return parsed;
   };
   let claudeCache;
+  let inFlight;
+  let lastGood;
   return {
-    // One shared request and a short cache, because `/status` and the limit wait
-    // can ask at the same time.
+    // One shared request and a short cache, because `/status`, `--check` and
+    // several limit waits can ask at the same time. If a read fails, the last
+    // good reading from the past 10 minutes is used; its old resets are ignored
+    // by `nextReset`.
     claude({ fresh = false } = {}) {
       if (!claudeToken) return Promise.resolve(undefined);
+      if (inFlight) return inFlight;
       if (!fresh && claudeCache && now() - claudeCache.at < ttlMs) return claudeCache.value;
-      const value = (async () => {
+      inFlight = (async () => {
         const token = await claudeToken().catch(() => undefined);
         // API keys have no subscription usage.
-        if (!token || token.startsWith('sk-ant-api')) return undefined;
+        if (typeof token !== 'string' || token.startsWith('sk-ant-api')) return undefined;
         const usage = await get('https://api.anthropic.com/api/oauth/usage', { authorization: `Bearer ${token}`, 'anthropic-beta': 'oauth-2025-04-20' },
           parseClaudeUsage, 'Claude', updateHint);
-        if (!usage && claudeCache?.value === value) claudeCache = undefined;
-        return usage;
-      })();
-      claudeCache = { at: now(), value };
-      return value;
+        if (usage) {
+          lastGood = { at: now(), usage };
+          claudeCache = { at: now(), value: Promise.resolve(usage) };
+          return usage;
+        }
+        claudeCache = undefined;
+        return lastGood && now() - lastGood.at < staleMs ? lastGood.usage : undefined;
+      })().finally(() => { inFlight = undefined; });
+      return inFlight;
     },
     // Uses the ChatGPT credentials of the request that hit the limit. API-key
     // accounts have no ChatGPT usage endpoint.
