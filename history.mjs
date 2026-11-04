@@ -58,6 +58,8 @@ export function fromResponses(input, { codec } = {}) {
         arguments: { encoding: item.type === 'custom_tool_call' ? 'text' : 'json', value: item.type === 'custom_tool_call' ? item.input : item.arguments || '{}' } };
     } else if (['function_call_output', 'custom_tool_call_output'].includes(item.type)) {
       entry = { kind: 'tool_result', callId: item.call_id, toolKind: item.type === 'custom_tool_call_output' ? 'custom' : 'function', content: content(item.output, 'responses'), isError: false };
+    } else if (item.type === 'agent_message') {
+      entry = { kind: 'agent_message', author: item.author ?? null, recipient: item.recipient ?? null, content: content(item.content, 'responses') };
     } else {
       entry = { kind: 'artifact', artifactType: item.type, provider: 'openai' };
     }
@@ -136,6 +138,9 @@ export function toOpenAI(canonical) {
     }
     if (entry.kind === 'message') return [{ ...extensions(native, ['type', 'role', 'content']), type: 'message', role: entry.role,
       content: responseContent(entry.content, entry.role) }];
+    if (entry.kind === 'agent_message') return [{ ...extensions(native, ['type', 'author', 'recipient', 'content']), type: 'agent_message',
+      ...(entry.author !== null ? { author: entry.author } : {}), ...(entry.recipient !== null ? { recipient: entry.recipient } : {}),
+      content: responseContent(entry.content, 'user') }];
     if (entry.kind === 'tool_call') {
       const custom = entry.arguments.encoding === 'text';
       const value = { ...extensions(native, ['type', 'call_id', 'name', 'namespace', 'input', 'arguments']), type: custom ? 'custom_tool_call' : 'function_call', call_id: entry.callId, name: entry.name,
@@ -165,6 +170,22 @@ function piContent(parts) {
     }
     throw new Error(`Unsupported message content: ${part.value?.type || part.kind}`);
   });
+}
+
+// Codex sends a message between agents as an `agent_message` input item. Its
+// header is plain text. The payload is in `encrypted_content`, which holds
+// Fernet ciphertext only OpenAI can read when an OpenAI model wrote it, and
+// plain text when Claude wrote it.
+const fernet = /^gAAAAA[A-Za-z0-9_-]+=*$/;
+function agentMessageText(parts) {
+  return parts.map(part => {
+    if (part.kind === 'text') return part.text;
+    const value = part.kind === 'opaque' ? part.value : undefined;
+    if (value?.type === 'encrypted_content' && typeof value.encrypted_content === 'string') {
+      return fernet.test(value.encrypted_content) ? '[This message payload is encrypted for OpenAI models and cannot be read here.]' : value.encrypted_content;
+    }
+    throw new Error(`Unsupported agent message content: ${value?.type || part.kind}`);
+  }).join('');
 }
 
 export function toAnthropic(canonical, model, { codec, toolName = name => name } = {}) {
@@ -230,6 +251,8 @@ export function toAnthropic(canonical, model, { codec, toolName = name => name }
         messages.push({ role: 'system', content: body, timestamp: Date.now() });
       } else if (entry.role === 'user') messages.push({ role: 'user', content: body, timestamp: Date.now() });
       else throw new Error(`Unsupported message role: ${entry.role}`);
+    } else if (entry.kind === 'agent_message') {
+      messages.push({ role: 'user', content: [{ type: 'text', text: agentMessageText(entry.content) }], timestamp: Date.now() });
     } else throw new Error(`Unsupported input item: ${entry.artifactType || entry.kind}`);
   }
   // Codex can save user steering or later assistant messages before an in-flight
