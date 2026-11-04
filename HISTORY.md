@@ -44,6 +44,7 @@ not guaranteed to survive edits, reordering, or compaction.
 | `tool_call` | `callId`, tool name, namespace, arguments encoded as JSON or raw text. |
 | `tool_result` | Matching `callId`, tool kind, content, and `isError`. |
 | `tool_definitions` | Role and tool declarations from Responses `additional_tools` items. |
+| `agent_message` | `author`, `recipient`, and ordered `content` from a Codex multi-agent `agent_message` item. Its `encrypted_content` part stays opaque. |
 | `artifact` | Provider-owned items such as compaction records and unknown future item types. |
 
 Provider-specific state includes OpenAI encrypted reasoning, Claude signed and
