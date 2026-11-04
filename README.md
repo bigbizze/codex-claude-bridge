@@ -227,6 +227,13 @@ requires HTTPS for that backend. So each launch does these steps:
 2. Pi serves a loopback HTTPS proxy. The proxy sends every request to
    `https://chatgpt.com` without changes. In the `/wham/usage` response, it
    adds one `claude` entry from Anthropic's usage endpoint (cached for 60 s).
+   Anthropic rate-limits that endpoint per account, and each bridge session
+   runs its own Pi process. So all sessions share the last reading and the
+   request timing in `${XDG_STATE_HOME:-~/.local/state}/codex-claude-bridge/claude-usage.json`
+   (mode 0600). The sessions together send at most one request every 30 s.
+   After an HTTP 429 or a server error, requests stop for 1 minute, then 2, 4
+   and so on up to 15 minutes, and the last good reading from the past 10
+   minutes is shown instead.
 3. Codex starts with `chatgpt_base_url` set to the proxy and
    `CODEX_CA_CERTIFICATE` set to the CA. This adds one trusted CA for that
    Codex process only. The system certificates stay trusted. If you already set
@@ -237,8 +244,10 @@ requires HTTPS for that backend. So each launch does these steps:
    secret can see only your Claude usage. If you use TLS inspection, set `NODE_EXTRA_CA_CERTS`
    for the bridge so the proxy can reach `chatgpt.com`.
 
-If `openssl` is missing or the Claude usage request fails, `/status` shows the
-ChatGPT limits only. Set `CODEX_BRIDGE_STATUS=0` to turn this off. Claude
+If `openssl` is missing, or the Claude usage request fails and there is no
+reading from the past 10 minutes, `/status` shows the ChatGPT limits only.
+`codex-claude --check` shows when Anthropic rate-limited the usage endpoint and
+when the next read is allowed. Set `CODEX_BRIDGE_STATUS=0` to turn this off. Claude
 limits do not appear in the status line or in `/usage` analytics.
 
 When a model reaches its usage limit before it sends any output, the bridge
@@ -274,7 +283,9 @@ Claude row.
 
 ## Supported and unsupported operations
 
-Supported: text, base64 images, developer instructions, streamed output, namespace/function/custom tools (including apply_patch), tool results, reasoning effort, reasoning signature replay, cache-aware token usage, cancellation, and full-history resume.
+Supported: text, base64 images, developer instructions, streamed output, namespace/function/custom tools (including apply_patch), tool results, reasoning effort, reasoning signature replay, cache-aware token usage, cancellation, full-history resume, and multi-agent messages.
+
+Codex multi-agent sessions send messages between agents as `agent_message` input items. Claude receives each one as user text: the plain header (message type, task name, sender) and the payload. When an OpenAI model wrote the message, Codex encrypts the payload for OpenAI models only, so Claude sees a placeholder in its place. OpenAI models receive the item unchanged.
 
 Claude receives readable tool names: `functions` tools keep their names, other namespaces become `<namespace>__<name>`, and characters outside `[a-zA-Z0-9_-]` become `_`. Tool names that are equal when case is ignored are rejected, because Pi's Claude OAuth transport maps returned names without case sensitivity. When Claude calls an undeclared name, the bridge sends that name to Codex unchanged. Codex returns `unsupported call: <name>` as the tool result, and Claude can correct the call in the same turn. The bridge never maps an unknown name to a declared tool.
 

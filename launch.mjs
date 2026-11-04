@@ -178,9 +178,13 @@ async function checkUsage(ready, token, config, env) {
   const percent = window => window ? `${Math.round(window.usedPercent)}%` : 'none';
   const usage = await fetch(`http://127.0.0.1:${ready.port}/usage`, { headers: { authorization: `Bearer ${token}` } }).then(response => response.json());
   const claude = usage.claude?.windows ?? [];
+  const state = usage.claudeState;
+  const clock = time => new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const limited = state?.backoffUntil ? ` Anthropic's usage endpoint returned HTTP ${state.failure}; next read after ${clock(state.backoffUntil)}.` : '';
   console.log(usage.claude
-    ? `Claude usage: OK; 5-hour ${percent(claude.find(item => item.id === 'five_hour'))}, weekly ${percent(claude.find(item => item.id === 'seven_day'))}.`
-    : 'Claude usage: unavailable.');
+    ? `Claude usage: OK; 5-hour ${percent(claude.find(item => item.id === 'five_hour'))}, weekly ${percent(claude.find(item => item.id === 'seven_day'))}`
+      + `${state?.at ? ` (read at ${clock(state.at)})` : ''}.${limited}`
+    : `Claude usage: unavailable.${limited}`);
   if (!ready.backendPort) console.log('/status proxy: off (CODEX_BRIDGE_STATUS=0 or no openssl).');
   else {
     const client = new AppServer(config, { env });

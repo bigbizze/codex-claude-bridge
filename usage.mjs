@@ -1,5 +1,8 @@
 // One usage shape for both providers. Both endpoints are undocumented, so every
 // reader fails closed: a missing or unknown response gives undefined, never an error.
+import { readFileSync, writeFileSync, renameSync, rmSync } from 'node:fs';
+import { randomBytes, createHash } from 'node:crypto';
+
 const HOUR = 3600;
 const timeMs = value => {
   if (typeof value === 'number' && Number.isFinite(value)) return value * 1000;
@@ -64,17 +67,29 @@ export function codexRateLimit(usage, now = Date.now()) {
 }
 
 const updateHint = 'Claude limits in /status and Claude limit waits are off until the bridge is updated.';
+// 408, 429 and 5xx mean "try later". Anthropic sends `retry-after: 0` with its
+// 429s, so a positive value is used only as a lower bound on the backoff.
+const retryLater = status => status === 408 || status === 429 || status >= 500;
+const retryAfterMs = (value, now) => {
+  if (!value) return 0;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? 0 : Math.max(0, at - now);
+};
 
 // A network failure is temporary. A changed format or a moved endpoint stays
 // until the bridge is updated, so it goes to `warn`. A rejected credential needs
 // a new login, not an update.
-export function createUsage({ claudeToken, fetchImpl = fetch, ttlMs = 60000, staleMs = 10 * 60000, timeoutMs = 5000, now = Date.now, log = () => {}, warn = () => {} } = {}) {
-  const get = async (url, headers, parse, name, effect) => {
+export function createUsage({ claudeToken, cacheFile, fetchImpl = fetch, ttlMs = 60000, minIntervalMs = 30000, staleMs = 10 * 60000,
+  backoffMs = 60000, maxBackoffMs = 15 * 60000, timeoutMs = 5000, now = Date.now, log = () => {}, warn = () => {} } = {}) {
+  const get = async (url, headers, parse, name, effect, failed = () => {}) => {
     let response;
     try {
       response = await fetchImpl(url, { headers, redirect: 'error', signal: AbortSignal.timeout(timeoutMs) });
     } catch (error) { log(`usage request failed: ${new URL(url).host} ${error.message}`); return undefined; }
     if (!response.ok) {
+      failed(response);
       if (response.status === 401 || response.status === 403) log(`usage request not authorized: ${new URL(url).host} ${response.status}`);
       else if (response.status >= 400 && response.status < 500 && ![408, 429].includes(response.status)) warn(`${name} usage endpoint returned HTTP ${response.status}. ${effect}`);
       else log(`usage request failed: ${new URL(url).host} ${response.status}`);
@@ -85,33 +100,69 @@ export function createUsage({ claudeToken, fetchImpl = fetch, ttlMs = 60000, sta
     if (!parsed) warn(`${name} usage format changed. ${effect}`);
     return parsed;
   };
-  let claudeCache;
+  // Every bridge session runs its own Pi process, and Anthropic rate-limits the
+  // usage endpoint per account. So the last good reading, the last attempt and
+  // the backoff are kept in one file that all sessions share.
+  let memory = {};
+  // A reading belongs to the login that made it, so a new token starts clean.
+  const readState = account => {
+    let state = memory;
+    if (cacheFile) try { state = JSON.parse(readFileSync(cacheFile, 'utf8')); } catch {}
+    if (!state || typeof state !== 'object' || (account && state.account !== account)) return { account };
+    return Array.isArray(state.usage?.windows) ? state : { ...state, usage: undefined };
+  };
+  const writeState = state => {
+    memory = state;
+    if (!cacheFile) return;
+    const pending = `${cacheFile}.${randomBytes(6).toString('hex')}.tmp`;
+    try { writeFileSync(pending, JSON.stringify(state), { mode: 0o600 }); renameSync(pending, cacheFile); }
+    catch (error) { log(`usage cache not written: ${error.message}`); rmSync(pending, { force: true }); }
+  };
   let inFlight;
-  let lastGood;
   return {
     // One shared request and a short cache, because `/status`, `--check` and
-    // several limit waits can ask at the same time. If a read fails, the last
-    // good reading from the past 10 minutes is used; its old resets are ignored
-    // by `nextReset`.
+    // several limit waits can ask at the same time. A fresh read still waits
+    // `minIntervalMs` after the last attempt by any session. If a read fails or
+    // is skipped, the last good reading from the past 10 minutes is used; its
+    // old resets are ignored by `nextReset`.
     claude({ fresh = false } = {}) {
       if (!claudeToken) return Promise.resolve(undefined);
       if (inFlight) return inFlight;
-      if (!fresh && claudeCache && now() - claudeCache.at < ttlMs) return claudeCache.value;
       inFlight = (async () => {
         const token = await claudeToken().catch(() => undefined);
         // API keys have no subscription usage.
         if (typeof token !== 'string' || token.startsWith('sk-ant-api')) return undefined;
+        const account = createHash('sha256').update(token).digest('hex').slice(0, 16);
+        const state = readState(account);
+        const time = now();
+        const stale = state.usage && time - state.at < staleMs ? state.usage : undefined;
+        if (!fresh && state.usage && time - state.at < ttlMs) return state.usage;
+        if (time < (state.backoffUntil ?? 0)) { log(`usage request skipped: backing off after HTTP ${state.failure}`); return stale; }
+        if (time - (state.attemptAt ?? 0) < minIntervalMs) return stale;
+        writeState({ ...state, attemptAt: time });
+        let failure;
         const usage = await get('https://api.anthropic.com/api/oauth/usage', { authorization: `Bearer ${token}`, 'anthropic-beta': 'oauth-2025-04-20' },
-          parseClaudeUsage, 'Claude', updateHint);
+          parseClaudeUsage, 'Claude', updateHint, response => { failure = response; });
         if (usage) {
-          lastGood = { at: now(), usage };
-          claudeCache = { at: now(), value: Promise.resolve(usage) };
+          writeState({ account, at: now(), usage, attemptAt: time });
           return usage;
         }
-        claudeCache = undefined;
-        return lastGood && now() - lastGood.at < staleMs ? lastGood.usage : undefined;
+        const latest = readState(account);
+        if (failure && retryLater(failure.status)) {
+          const failures = (latest.failures ?? 0) + 1;
+          const wait = Math.max(retryAfterMs(failure.headers.get('retry-after'), now()), Math.min(maxBackoffMs, backoffMs * 2 ** (failures - 1)));
+          writeState({ ...latest, attemptAt: time, failures, failure: failure.status, backoffUntil: now() + wait });
+        }
+        return latest.usage && now() - latest.at < staleMs ? latest.usage : undefined;
       })().finally(() => { inFlight = undefined; });
       return inFlight;
+    },
+    // For `--check`: when the last good reading is from, and whether reads are
+    // paused after a rate limit.
+    claudeState() {
+      const { at, backoffUntil, failure } = readState(memory.account);
+      const paused = backoffUntil > now();
+      return { at: at ?? null, backoffUntil: paused ? backoffUntil : null, failure: paused ? failure : null };
     },
     // Uses the ChatGPT credentials of the request that hit the limit. API-key
     // accounts have no ChatGPT usage endpoint.
