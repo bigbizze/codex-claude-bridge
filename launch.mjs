@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 import { createHandoff, parseSwitch } from './handoff.mjs';
 import { createLocalCertificates } from './certs.mjs';
 import { AppServer } from './app-server.mjs';
-import { readWarnings } from './warnings.mjs';
+import { createDiagnostics, readWarnings } from './warnings.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const model = process.env.CODEX_CLAUDE_MODEL || 'anthropic/claude-opus-5-5';
@@ -118,7 +118,8 @@ async function main() {
     '--no-skills', '--no-context-files', '--no-prompt-templates', '--no-themes', '--no-tools', '--model', model],
     { env, stdio: ['pipe', 'pipe', 'pipe'] });
   let errors = '';
-  pi.process.stderr.on('data', chunk => { errors = (errors + chunk).slice(-4000); if (process.env.CODEX_PI_DEBUG) process.stderr.write(chunk); });
+  const diagnostics = createDiagnostics({ debug: Boolean(process.env.CODEX_PI_DEBUG) });
+  pi.process.stderr.on('data', chunk => { errors = (errors + chunk).slice(-4000); diagnostics(chunk); });
   pi.process.stdout.resume();
   let ready;
   const deadline = Date.now() + 30000;

@@ -253,6 +253,11 @@ limits do not appear in the status line or in `/usage` analytics.
 When a model reaches its usage limit before it sends any output, the bridge
 can wait until the limit resets and then send the same request again. Codex
 shows `Working` during the wait, and the turn continues after the reset. The
+launcher also prints the model, reset time and remaining minutes to stderr when
+the wait starts, and a message when it retries. These notices appear even without
+`CODEX_PI_DEBUG`; they do not change Codex's `Working` label. Press Esc to cancel
+the wait. For example: `[pi-codex] anthropic/claude-opus-5-5 usage limit reached;
+waiting until 04:00 PM (25 min)`. The
 bridge gets the reset time from the provider usage endpoint (for OpenAI, first
 from the error). It waits for the latest reset of the full windows that apply
 to the model, for example the 5-hour, weekly and model-specific weekly limits. It waits in steps of 1 minute against the wall clock, so it
