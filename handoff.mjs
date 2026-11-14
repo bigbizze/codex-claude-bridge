@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile, stat } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, stat, realpath } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { AppServer } from './app-server.mjs';
 
@@ -127,7 +127,11 @@ export async function createHandoff({ sourceId, destination, stateDir, args = []
     const raw = await readFile(source.path);
     if (raw.length > maxArchiveBytes) throw new Error('Source archive exceeds 128 MiB. No history was truncated.');
     const state = projectRollout(raw, sourceId);
-    if (!isAbsolute(state.cwd || '') || state.cwd !== source.cwd) throw new Error('Source working directory is missing or inconsistent.');
+    if (!isAbsolute(state.cwd || '') || !isAbsolute(source.cwd || '')) throw new Error('Source working directory is missing or inconsistent.');
+    // Codex may report a symlink-resolved path, such as /private/var for /var on macOS.
+    const [recordedCwd, reportedCwd] = await Promise.all([state.cwd, source.cwd].map(path => realpath(path).catch(() => null)));
+    if (!recordedCwd) throw new Error('Source working directory is not available.');
+    if (recordedCwd !== reportedCwd) throw new Error('Source working directory is missing or inconsistent.');
     if (!(await stat(state.cwd)).isDirectory()) throw new Error('Source working directory is not available.');
     const hash = digest(raw);
     archiveDir = join(stateDir, 'handoffs', randomUUID());

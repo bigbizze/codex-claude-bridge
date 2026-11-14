@@ -10,13 +10,18 @@ Defaults: `anthropic/claude-opus-5-5`, medium reasoning effort.
 Requirements: Node.js 22 or newer, the `codex` and `pi` CLIs on `PATH`, and
 Anthropic access configured in Pi, and OpenAI access configured with `codex login`.
 `openssl` is optional. It is necessary only to show Claude limits in `/status`.
-The combined model picker and routing are tested with Codex 0.163.0 and Pi 0.87.1.
+The combined model picker and routing are tested with Codex 0.167.0 and Pi 1.5.2.
+Use Pi 1.3.0 or newer. Pi's catalog service sends older Pi versions an older
+Anthropic model list, so newer models such as `claude-fable-5-2` are missing
+from `/model` even after `pi update --models`.
 
 Install those CLI versions if they are not already available:
 
 ```bash
-npm install -g @openai/codex@0.163.0 @earendil-works/pi-coding-agent@0.87.1
+npm install -g @openai/codex@0.167.0 @earendil-works/pi-coding-agent@1.5.2
 ```
+
+For Pi's managed install, run `pi update`, then `pi update --models`.
 
 Clone this repository and enter its directory:
 
@@ -333,7 +338,7 @@ streaming starts. It does not repeat a response after streaming starts.
 This updates only the bridge, not Codex or Pi. If Git reports local changes or
 divergent history, resolve those before retrying; do not discard your changes.
 
-Validated with Codex 0.156.1, Pi 0.87.1, and Node 24.21.0. The earlier Codex 0.156.0 to 0.156.1 upgrade did not break model calls.
+Validated with Codex 0.167.0, Pi 1.5.2, and Node 22.23.4. The Pi 0.87.1 to 1.5.2 upgrade did not require bridge changes.
 
 | Change | What to check |
 | --- | --- |
@@ -345,6 +350,7 @@ Validated with Codex 0.156.1, Pi 0.87.1, and Node 24.21.0. The earlier Codex 0.1
 | OpenAI access error | Run `codex login`, then restart the bridge. OpenAI access uses Codex credentials, not Pi credentials. |
 | OpenAI models missing from `/model` | Exit the old bridge process, resume with the updated `codex-claude`, and run `codex-claude --check` if the list is still missing. |
 | New Claude model/client-version error | Update Pi; its provider transport owns the client version. Updating Claude Code alone does not update Pi's transport. |
+| New Claude model missing from `/model` | Check `pi --version`. Pi versions before 1.3.0 receive an older model catalog. Run `pi update`, then `pi update --models`, and restart the bridge. |
 | Node/PATH change | Ensure `node`, `pi`, and `codex` are available in the same shell. The alias depends on this project remaining at its current path. |
 | Existing old session | Exit and relaunch it. A running Node process keeps its already-loaded implementation. |
 
