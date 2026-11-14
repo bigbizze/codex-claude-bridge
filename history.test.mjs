@@ -8,6 +8,23 @@ const model = { provider: 'anthropic', id: 'claude-test', api: 'anthropic-messag
 const codec = createCodec(randomBytes(32));
 const serialize = value => JSON.parse(JSON.stringify(value));
 
+test('Codex goal objectives without call IDs retain their source and project as user context', () => {
+  const notification = { type: 'function_call_output', id: 'fco_goal', name: 'goal_objective', namespace: 'agent',
+    output: 'Continue the existing task ledger.', internal_chat_message_metadata_passthrough: { turn_id: 'turn1' } };
+  const input = [{ role: 'user', content: 'Start' }, notification];
+  const canonical = serialize(fromResponses(input));
+  assert.deepEqual(restoreSource(canonical), input);
+  assert.deepEqual(toOpenAI(canonical), input.map(item => item.role ? { ...item, type: 'message', content: [{ type: 'input_text', text: item.content }] } : item));
+  const projected = toAnthropic(canonical, model);
+  assert.equal(projected[1].role, 'user');
+  assert.deepEqual(projected[1].content, [{ type: 'text', text: 'Goal objective update:' }, { type: 'text', text: notification.output }]);
+  canonical.entries[1].content[0].text = 'Updated objective';
+  assert.equal(toOpenAI(canonical)[1].output, 'Updated objective');
+  for (const invalid of [{ ...notification, namespace: 'functions' }, { ...notification, name: 'unknown' }, { ...notification, call_id: 'missing' }]) {
+    assert.throws(() => toAnthropic(fromResponses([invalid]), model), /No preceding tool call/);
+  }
+});
+
 test('inline tool declarations survive canonical and OpenAI replay without becoming Claude messages', () => {
   const input = [{ type: 'additional_tools', id: 'at_saved', role: 'developer', extra: true,
     tools: [{ type: 'function', name: 'lookup', parameters: { type: 'object' } }] },

@@ -4,6 +4,31 @@ import { randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { createCodec, translate } from './bridge.mjs';
 
+test('Pi sends a Codex goal objective as user context without an unmatched tool result', {
+  skip: !process.env.PI_ANTHROPIC_MODULE,
+}, async () => {
+  const { stream } = await import(pathToFileURL(process.env.PI_ANTHROPIC_MODULE).href);
+  const { normalizeContext } = await import(new URL('../utils/transcript.js', pathToFileURL(process.env.PI_ANTHROPIC_MODULE)).href);
+  const model = { id: 'claude-test', provider: 'anthropic', api: 'anthropic-messages',
+    baseUrl: 'https://api.anthropic.com', input: ['text'], maxTokens: 4096,
+    contextWindow: 200000, reasoning: false, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+  const objective = 'Continue the task ledger. Delegate changes to workers.';
+  const { context } = translate({ input: [{ type: 'function_call_output', id: 'fco_goal',
+    name: 'goal_objective', namespace: 'agent', output: objective }] }, model);
+  let payload;
+  let transported = false;
+  const result = await stream(model, normalizeContext(context), {
+    client: { messages: { create() { transported = true; throw new Error('Unexpected transport'); } } },
+    onPayload(value) { payload = value; throw new Error('Offline goal capture'); },
+  }).result();
+  assert.equal(transported, false);
+  assert.match(result.errorMessage, /Offline goal capture/);
+  assert.equal(payload.messages.length, 1);
+  assert.equal(payload.messages[0].role, 'user');
+  assert.ok(payload.messages[0].content.some(block => block.type === 'text' && block.text.includes(objective)));
+  assert.ok(payload.messages[0].content.every(block => block.type === 'text'));
+});
+
 test('Pi serializes compacted inline tool declarations into Anthropic tools without history artifacts', {
   skip: !process.env.PI_ANTHROPIC_MODULE,
 }, async () => {
