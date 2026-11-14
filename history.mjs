@@ -56,6 +56,8 @@ export function fromResponses(input, { codec } = {}) {
     } else if (['function_call', 'custom_tool_call'].includes(item.type)) {
       entry = { kind: 'tool_call', callId: item.call_id, name: item.name, namespace: item.namespace ?? null,
         arguments: { encoding: item.type === 'custom_tool_call' ? 'text' : 'json', value: item.type === 'custom_tool_call' ? item.input : item.arguments || '{}' } };
+    } else if (item.type === 'function_call_output' && item.call_id == null && item.namespace === 'agent' && item.name === 'goal_objective') {
+      entry = { kind: 'goal_objective', content: content(item.output, 'responses') };
     } else if (['function_call_output', 'custom_tool_call_output'].includes(item.type)) {
       entry = { kind: 'tool_result', callId: item.call_id, toolKind: item.type === 'custom_tool_call_output' ? 'custom' : 'function', content: content(item.output, 'responses'), isError: false };
     } else {
@@ -124,6 +126,8 @@ export function toOpenAI(canonical) {
   assertRequest(canonical);
   return canonical.entries.flatMap(entry => {
     const native = canonical.source.format === 'responses' ? original(canonical, entry) : null;
+    if (entry.kind === 'goal_objective') return [{ ...clone(native), output: typeof native?.output === 'string' && entry.content.every(part => part.kind === 'text')
+      ? entry.content.map(part => part.text).join('') : responseContent(entry.content, 'user') }];
     if (entry.kind === 'tool_definitions') return [{ ...extensions(native, ['type', 'role', 'tools']),
       type: 'additional_tools', role: entry.role, tools: clone(entry.tools) }];
     if (entry.kind === 'reasoning') {
@@ -180,6 +184,10 @@ export function toAnthropic(canonical, model, { codec, toolName = name => name }
   };
   for (const entry of canonical.entries) {
     if (entry.kind === 'tool_definitions') continue;
+    if (entry.kind === 'goal_objective') {
+      messages.push({ role: 'user', content: [{ type: 'text', text: 'Goal objective update:' }, ...piContent(entry.content)], timestamp: Date.now() });
+      continue;
+    }
     if (entry.kind === 'reasoning') {
       const state = entry.state;
       if (state.provider === 'anthropic') {
