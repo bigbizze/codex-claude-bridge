@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 import { createHandoff, parseSwitch } from './handoff.mjs';
 import { createLocalCertificates } from './certs.mjs';
 import { AppServer } from './app-server.mjs';
-import { readWarnings } from './warnings.mjs';
+import { createDiagnostics, readWarnings } from './warnings.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const model = process.env.CODEX_CLAUDE_MODEL || 'anthropic/claude-opus-5-5';
@@ -118,7 +118,8 @@ async function main() {
     '--no-skills', '--no-context-files', '--no-prompt-templates', '--no-themes', '--no-tools', '--model', model],
     { env, stdio: ['pipe', 'pipe', 'pipe'] });
   let errors = '';
-  pi.process.stderr.on('data', chunk => { errors = (errors + chunk).slice(-4000); if (process.env.CODEX_PI_DEBUG) process.stderr.write(chunk); });
+  const diagnostics = createDiagnostics({ debug: Boolean(process.env.CODEX_PI_DEBUG) });
+  pi.process.stderr.on('data', chunk => { errors = (errors + chunk).slice(-4000); diagnostics(chunk); });
   pi.process.stdout.resume();
   let ready;
   const deadline = Date.now() + 30000;
@@ -178,9 +179,13 @@ async function checkUsage(ready, token, config, env) {
   const percent = window => window ? `${Math.round(window.usedPercent)}%` : 'none';
   const usage = await fetch(`http://127.0.0.1:${ready.port}/usage`, { headers: { authorization: `Bearer ${token}` } }).then(response => response.json());
   const claude = usage.claude?.windows ?? [];
+  const state = usage.claudeState;
+  const clock = time => new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const limited = state?.backoffUntil ? ` Anthropic's usage endpoint returned HTTP ${state.failure}; next read after ${clock(state.backoffUntil)}.` : '';
   console.log(usage.claude
-    ? `Claude usage: OK; 5-hour ${percent(claude.find(item => item.id === 'five_hour'))}, weekly ${percent(claude.find(item => item.id === 'seven_day'))}.`
-    : 'Claude usage: unavailable.');
+    ? `Claude usage: OK; 5-hour ${percent(claude.find(item => item.id === 'five_hour'))}, weekly ${percent(claude.find(item => item.id === 'seven_day'))}`
+      + `${state?.at ? ` (read at ${clock(state.at)})` : ''}.${limited}`
+    : `Claude usage: unavailable.${limited}`);
   if (!ready.backendPort) console.log('/status proxy: off (CODEX_BRIDGE_STATUS=0 or no openssl).');
   else {
     const client = new AppServer(config, { env });
