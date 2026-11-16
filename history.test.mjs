@@ -65,6 +65,23 @@ test('Claude rejects ambiguous repeated tool IDs and duplicate results before in
   assert.throws(() => toAnthropic(fromResponses([call, result, result]), model), /Duplicate tool result/);
 });
 
+test('agent messages between Codex agents replay losslessly to OpenAI and become user text for Claude', () => {
+  const header = 'Message Type: NEW_TASK\nTask name: fix\nSender: /root\nPayload:\n';
+  const message = (payload, id) => ({ type: 'agent_message', id, author: '/root', recipient: '/root/fix', internal_chat_message_metadata_passthrough: { turn: 1 },
+    content: [{ type: 'input_text', text: header }, { type: 'encrypted_content', encrypted_content: payload }] });
+  const source = [message('Fix the bug.', 'amsg_plain'), message('gAAAAABpAbc-_12=', 'amsg_sealed'), { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Continue' }] }];
+  const canonical = serialize(fromResponses(source));
+  assert.equal(canonical.entries[0].kind, 'agent_message');
+  assert.deepEqual(toOpenAI(canonical), source);
+  assert.deepEqual(restoreSource(canonical), source);
+  const claude = toAnthropic(canonical, model);
+  assert.deepEqual(claude.map(item => item.role), ['user', 'user', 'user']);
+  assert.equal(claude[0].content[0].text, `${header}Fix the bug.`);
+  assert.equal(claude[1].content[0].text, `${header}[This message payload is encrypted for OpenAI models and cannot be read here.]`);
+  const unknown = fromResponses([{ type: 'agent_message', content: [{ type: 'future_part', data: 1 }] }]);
+  assert.throws(() => toAnthropic(unknown, model), /Unsupported agent message content: future_part/);
+});
+
 test('Responses import is lossless after canonical serialization, including native fields and unknown artifacts', () => {
   const source = [
     { type: 'message', id: 'msg_1', role: 'assistant', content: [{ type: 'output_text', text: 'Answer', annotations: [{ type: 'citation', url: 'https://example.com' }] }], status: 'completed', phase: 'final_answer' },

@@ -1,5 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { parseClaudeUsage, parseOpenAIUsage, nextReset, codexRateLimit, createUsage } from './usage.mjs';
 
 // Shapes recorded from the live endpoints on 2026-11-02, with unused fields removed.
@@ -63,7 +66,8 @@ test('Claude usage becomes a Codex additional_rate_limits entry', () => {
 
 test('usage requests fail closed and share one cached Claude request', async () => {
   let calls = 0;
-  const reader = createUsage({ claudeToken: async () => 'token', fetchImpl: async (url, options) => {
+  let clock = now;
+  const reader = createUsage({ claudeToken: async () => 'token', now: () => clock, fetchImpl: async (url, options) => {
     calls++;
     assert.equal(options.headers['anthropic-beta'], 'oauth-2025-04-20');
     return Response.json(claude);
@@ -71,6 +75,10 @@ test('usage requests fail closed and share one cached Claude request', async () 
   const [first, second] = await Promise.all([reader.claude(), reader.claude()]);
   assert.equal(first, second);
   assert.equal(calls, 1);
+  // A fresh read skips the cache, but not the minimum interval between requests.
+  await reader.claude({ fresh: true });
+  assert.equal(calls, 1);
+  clock += 30000;
   await reader.claude({ fresh: true });
   assert.equal(calls, 2);
   const warnings = [];
@@ -97,4 +105,55 @@ test('usage requests fail closed and share one cached Claude request', async () 
   const good = await flaky.claude();
   up = false;
   assert.equal(await flaky.claude({ fresh: true }), good);
+});
+
+test('Claude usage is shared across sessions and backs off after a rate limit', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'usage-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const cacheFile = join(dir, 'claude-usage.json');
+  let clock = now;
+  let status = 200;
+  let calls = 0;
+  const fetchImpl = async () => { calls++; return status === 200 ? Response.json(claude) : new Response('limited', { status, headers: { 'retry-after': '0' } }); };
+  const session = () => createUsage({ claudeToken: async () => 'token', cacheFile, fetchImpl, now: () => clock });
+  const [one, two] = [session(), session()];
+  // The file has no undefined fields, which nextReset and codexRateLimit treat the same way.
+  const plain = value => value && JSON.parse(JSON.stringify(value));
+  const good = plain(await one.claude());
+  assert.equal(statSync(cacheFile).mode & 0o777, 0o600);
+  // Another session uses the reading of the first one, even for a fresh read.
+  assert.deepEqual(plain(await two.claude()), good);
+  assert.deepEqual(plain(await two.claude({ fresh: true })), good);
+  assert.equal(calls, 1);
+  // A 429 starts a backoff for every session. The last good reading stays in use.
+  status = 429;
+  clock += 60000;
+  assert.deepEqual(plain(await two.claude({ fresh: true })), good);
+  assert.equal(calls, 2);
+  assert.deepEqual(one.claudeState(), { at: now, backoffUntil: clock + 60000, failure: 429 });
+  clock += 59000;
+  assert.deepEqual(plain(await one.claude({ fresh: true })), good);
+  assert.equal(calls, 2);
+  // Each further failure doubles the backoff.
+  clock += 1000;
+  await one.claude({ fresh: true });
+  assert.equal(calls, 3);
+  assert.equal(two.claudeState().backoffUntil, clock + 120000);
+  // After 10 minutes the old reading is not used, and success ends the backoff.
+  clock += 120000;
+  status = 200;
+  assert.deepEqual(plain(await two.claude({ fresh: true })), good);
+  assert.equal(calls, 4);
+  assert.deepEqual(one.claudeState(), { at: clock, backoffUntil: null, failure: null });
+  status = 429;
+  clock += 30000;
+  await one.claude({ fresh: true });
+  clock += 11 * 60000;
+  assert.equal(await two.claude({ fresh: true }), undefined);
+  // A reading made with another login is not used.
+  status = 200;
+  clock += 30 * 60000;
+  await one.claude();
+  const other = createUsage({ claudeToken: async () => 'other-token', cacheFile, fetchImpl: async () => new Response('limited', { status: 429 }), now: () => clock });
+  assert.equal(await other.claude(), undefined);
 });

@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { createBridge, createCodec, catalog } from './bridge.mjs';
 import { mergeCatalogs } from './model-catalog.mjs';
 import { createUsage } from './usage.mjs';
@@ -25,7 +26,8 @@ export default function (pi: any) {
     if (process.env.CODEX_BRIDGE_WAIT_MAX && parseDuration(process.env.CODEX_BRIDGE_WAIT_MAX) === undefined) {
       warn(`CODEX_BRIDGE_WAIT_MAX="${process.env.CODEX_BRIDGE_WAIT_MAX}" is not valid, so the default of 6h was used. Use a number with s, m or h, for example 90m.`);
     }
-    const usageReader = createUsage({ claudeToken: () => ctx.modelRegistry.getApiKeyForProvider('anthropic'), log, warn });
+    const usageReader = createUsage({ claudeToken: () => ctx.modelRegistry.getApiKeyForProvider('anthropic'),
+      cacheFile: join(dirname(keyFile), 'claude-usage.json'), log, warn });
     bridge = createBridge({ registry: ctx.modelRegistry, token, codec: createCodec(readFileSync(keyFile)), usageReader, limitPolicy: waitPolicy(),
       openai: openaiCatalogFile ? { catalog: openaiCatalog } : undefined });
     await listen(bridge.server);
