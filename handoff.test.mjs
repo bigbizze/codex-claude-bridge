@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, readFile, stat, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, stat, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHandoff, parseSwitch, projectRollout } from './handoff.mjs';
@@ -112,7 +112,7 @@ async function fixture(t, options = {}) {
     async close() { closed = true; },
     async call(method, params) {
       requests.push({ method, params });
-      if (method === 'thread/read') return { thread: { id: sourceId, path, cwd: dir, status: { type: options.active ? 'active' : 'notLoaded' }, historyMode: options.historyMode ?? 'legacy' } };
+      if (method === 'thread/read') return { thread: { id: sourceId, path, cwd: options.reportedCwd?.(dir) ?? dir, status: { type: options.active ? 'active' : 'notLoaded' }, historyMode: options.historyMode ?? 'legacy' } };
       if (method === 'thread/start') return { thread: { id: targetId, modelProvider: options.provider ?? 'openai' }, model: 'configured-default', reasoningEffort: 'high' };
       if (method === 'thread/inject_items' && options.failInject) throw new Error('injection failed');
       if (method === 'thread/inject_items' && options.mutate) await writeFile(path, Buffer.concat([raw, Buffer.from('\n')]));
@@ -143,6 +143,18 @@ test('Claude handoff checks that the bridge configuration is active', async t =>
   const wrong = await fixture(t, { destination: 'claude', provider: 'openai' });
   await assert.rejects(wrong.run(), /wrong provider/);
   assert.ok(!wrong.requests.some(r => r.method === 'thread/inject_items'));
+});
+
+test('handoff accepts a symlink-resolved working directory and rejects a different one', async t => {
+  const links = await mkdtemp(join(tmpdir(), 'bridge-handoff-link-'));
+  t.after(() => rm(links, { recursive: true, force: true }));
+  const link = join(links, 'cwd');
+  const linked = await fixture(t, { reportedCwd: () => link });
+  await symlink(linked.dir, link);
+  assert.equal((await linked.run()).cwd, linked.dir);
+  const other = await fixture(t, { reportedCwd: () => tmpdir() });
+  await assert.rejects(other.run(), /inconsistent/);
+  assert.ok(!other.requests.some(r => r.method === 'thread/start'));
 });
 
 test('failures never launch a continuation and retain the original', async t => {
