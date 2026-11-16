@@ -48,21 +48,27 @@ export function createSelectedModelReader(codexHome = process.env.CODEX_HOME || 
     if (!uuid.test(identity.threadId) || !uuid.test(identity.turnId)) return;
     try {
       const entries = await readdir(join(codexHome, 'sessions'), { recursive: true, withFileTypes: true });
-      const matches = entries.filter(entry => entry.isFile() && entry.name.startsWith('rollout-') && entry.name.endsWith(`-${identity.threadId}.jsonl`));
-      if (matches.length !== 1) return;
-      const entry = matches[0];
-      const file = await open(join(entry.parentPath, entry.name), 'r');
-      try {
-        const { size } = await file.stat();
-        const start = Math.max(0, size - maxTailBytes);
-        const buffer = Buffer.alloc(size - start);
-        const { bytesRead } = await file.read(buffer, 0, buffer.length, start);
-        let lines = buffer.subarray(0, bytesRead).toString('utf8').split('\n');
-        if (start) lines.shift();
-        // Do not infer a selection from a partially flushed record.
-        if (lines.pop() !== '') return;
-        return selectedModelForTurn(lines.filter(Boolean).map(line => JSON.parse(line)), identity);
-      } finally { await file.close(); }
+      const suffix = new RegExp(`-${identity.threadId}(?:_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?\\.jsonl$`, 'i');
+      const matches = entries.filter(entry => entry.isFile() && entry.name.startsWith('rollout-') && suffix.test(entry.name));
+      const selections = [];
+      for (const entry of matches) {
+        const file = await open(join(entry.parentPath, entry.name), 'r');
+        try {
+          const { size } = await file.stat();
+          const start = Math.max(0, size - maxTailBytes);
+          const buffer = Buffer.alloc(size - start);
+          const { bytesRead } = await file.read(buffer, 0, buffer.length, start);
+          let lines = buffer.subarray(0, bytesRead).toString('utf8').split('\n');
+          if (start) lines.shift();
+          // Do not infer a selection from a partially flushed record.
+          if (lines.pop() !== '') continue;
+          const selected = selectedModelForTurn(lines.filter(Boolean).map(line => JSON.parse(line)), identity);
+          if (selected) selections.push(selected);
+        } finally { await file.close(); }
+      }
+      // Resumes can coexist with the original rollout. Only the exact active turn
+      // identifies the selection; ambiguous matches must not redirect a request.
+      if (selections.length === 1) return selections[0];
     } catch { return; }
   };
 }
