@@ -242,7 +242,13 @@ export function toAnthropic(canonical, model, { codec, toolName = name => name }
     } else if (entry.kind === 'tool_result') {
       const name = toolNames.get(entry.callId);
       if (!name) throw new Error(`No preceding tool call for ${entry.callId}`);
-      if (answeredCalls.has(entry.callId)) throw new Error(`Duplicate tool result for ${entry.callId}`);
+      // Codex code-mode `exec` records one output when the script yields and
+      // another for each later notify() under the same call ID. Claude accepts
+      // one result per call, so later outputs become user text in arrival order.
+      if (answeredCalls.has(entry.callId)) {
+        messages.push({ role: 'user', content: [{ type: 'text', text: `Later output from tool call ${entry.callId} (${name}):` }, ...piContent(entry.content)], timestamp: Date.now() });
+        continue;
+      }
       answeredCalls.add(entry.callId);
       const result = { role: 'toolResult', toolCallId: entry.callId, toolName: name, content: piContent(entry.content), isError: entry.isError, timestamp: Date.now() };
       const owner = toolOwners.get(entry.callId);

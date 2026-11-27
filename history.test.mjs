@@ -58,11 +58,23 @@ test('Claude groups late parallel results with their calls across user steering 
   assert.deepEqual(restoreSource(canonical), input);
 });
 
-test('Claude rejects ambiguous repeated tool IDs and duplicate results before inference', () => {
+test('Claude rejects ambiguous repeated tool IDs before inference', () => {
   const call = { type: 'function_call', call_id: 'a', name: 'write_stdin', arguments: '{}' };
-  const result = { type: 'function_call_output', call_id: 'a', output: 'done' };
   assert.throws(() => toAnthropic(fromResponses([call, call]), model), /Duplicate tool call ID/);
-  assert.throws(() => toAnthropic(fromResponses([call, result, result]), model), /Duplicate tool result/);
+});
+
+test('Claude receives later code-mode exec outputs for one call as user text in arrival order', () => {
+  const call = { type: 'custom_tool_call', call_id: 'x', name: 'exec', input: 'notify(1)' };
+  const first = { type: 'custom_tool_call_output', call_id: 'x', output: 'Script running' };
+  const later = { type: 'custom_tool_call_output', call_id: 'x', name: 'exec', output: 'notified' };
+  const user = { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] };
+  const source = [call, first, user, later];
+  const canonical = fromResponses(source);
+  const projected = toAnthropic(canonical, model);
+  assert.deepEqual(projected.map(message => message.role), ['assistant', 'toolResult', 'user', 'user']);
+  assert.deepEqual(projected[1].content, [{ type: 'text', text: 'Script running' }]);
+  assert.deepEqual(projected[3].content, [{ type: 'text', text: 'Later output from tool call x (exec):' }, { type: 'text', text: 'notified' }]);
+  assert.deepEqual(restoreSource(canonical), source);
 });
 
 test('agent messages between Codex agents replay losslessly to OpenAI and become user text for Claude', () => {
